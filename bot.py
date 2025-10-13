@@ -23,8 +23,7 @@ async def on_ready():
 
 @bot.event
 async def on_message(message: discord.Message):
-    # Solo mensajes en servidores y que no sean de bots
-    if message.guild and not message.author.bot:
+    if message.guild:
         try:
             content = message.content or ""
             author_id = message.author.id
