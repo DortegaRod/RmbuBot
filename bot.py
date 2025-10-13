@@ -1,7 +1,6 @@
 import discord
 from discord.ext import commands
 import asyncio
-from datetime import datetime, timedelta
 from config import TOKEN, ADMIN_LOG_CHANNEL_ID, INTENTS
 import db
 from notifier import send_admin_embed
@@ -21,8 +20,6 @@ async def on_ready():
     print(f"[READY] Conectado como {bot.user} (ID {bot.user.id})")
     db.init_db()
     print("[INFO] Base de datos inicializada")
-    # Iniciar tarea de limpieza mensual
-    bot.loop.create_task(cleanup_old_messages())
 
 @bot.event
 async def on_message(message: discord.Message):
@@ -87,22 +84,9 @@ async def on_raw_message_delete(payload: discord.RawMessageDeleteEvent):
             print(f"[ERROR] Error enviando notificación: {e}")
 
 
-async def cleanup_old_messages():
-    while True:
-        cutoff = datetime.utcnow() - timedelta(days=7)  # 7 días (1 semana)
-
-        # Eliminar mensajes antiguos de la base de datos
-        deleted_count = db.delete_messages_older_than(cutoff)
-        print(f"[CLEANUP] Mensajes eliminados mayores a 7 días: {deleted_count}")
-
-        # Esperar 1 día para el próximo ciclo
-        await asyncio.sleep(86400)  # 86400 segundos = 1 día
-
-
 @bot.event
 async def on_ready():
     db.init_db()
-    bot.loop.create_task(cleanup_old_messages())
 
 if __name__ == '__main__':
     print("[INIT] Iniciando bot...")

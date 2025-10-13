@@ -46,12 +46,3 @@ def get_message(message_id: int) -> Optional[dict]:
         "channel_id": row[3],
         "created_at": row[4]
     }
-
-def delete_messages_older_than(cutoff) -> int:
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("DELETE FROM mensajes WHERE created_at < ?", (cutoff,))
-    deleted_count = c.rowcount
-    conn.commit()
-    conn.close()
-    return deleted_count
