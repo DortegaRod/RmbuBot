@@ -26,6 +26,9 @@ async def on_message(message: discord.Message):
     if message.guild:
         try:
             content = message.content or ""
+            if not content and message.embeds:
+                embed = message.embeds[0]
+                content = embed.title or "" + "\n" + embed.description or ""
             author_id = message.author.id
             channel_id = message.channel.id
             # Guardar siempre en BD
