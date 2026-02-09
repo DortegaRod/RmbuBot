@@ -18,9 +18,14 @@ YDL_OPTIONS = {
     'logtostderr': False,
     'quiet': True,
     'no_warnings': True,
-    'default_search': 'auto',
+    'default_search': 'ytsearch',
     'source_address': '0.0.0.0',
-    'extract_flat': True,
+    'socket_timeout': 30,
+    'retries': 3,
+    # Opciones adicionales para mayor estabilidad
+    'age_limit': None,
+    'geo_bypass': True,
+    'prefer_insecure': False,
 }
 
 FFMPEG_OPTIONS = {
@@ -121,35 +126,110 @@ async def search_youtube(query: str) -> Optional[Song]:
     Returns:
         Song si se encuentra, None en caso contrario
     """
+    logger.info(f"Buscando: {query}")
+
     try:
-        with yt_dlp.YoutubeDL(YDL_OPTIONS) as ydl:
+        # Configuración específica para esta búsqueda
+        ydl_opts = YDL_OPTIONS.copy()
+
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             # Si no es una URL, buscar en YouTube
-            if not query.startswith('http'):
-                query = f"ytsearch:{query}"
+            search_query = query if query.startswith('http') else f"ytsearch1:{query}"
 
-            info = await asyncio.to_thread(ydl.extract_info, query, download=False)
+            logger.info(f"Ejecutando búsqueda: {search_query}")
 
-            if 'entries' in info:
-                # Es una búsqueda, tomar el primer resultado
-                info = info['entries'][0]
+            # Extraer info
+            info = await asyncio.to_thread(ydl.extract_info, search_query, download=False)
 
-            # Obtener la URL del stream
-            if 'url' in info:
-                url = info['url']
-            elif 'formats' in info:
-                # Buscar el mejor formato de audio
-                url = info['formats'][0]['url']
-            else:
-                logger.error("No se pudo obtener URL del video")
+            # Debug: ver qué devolvió yt-dlp
+            if info is None:
+                logger.error("yt-dlp devolvió None")
                 return None
 
+            logger.debug(f"Claves en info: {info.keys() if isinstance(info, dict) else 'No es dict'}")
+
+            # Manejar búsquedas (entries)
+            if 'entries' in info:
+                logger.debug(f"Encontradas {len(info.get('entries', []))} entradas")
+
+                entries = info['entries']
+                if not entries or len(entries) == 0:
+                    logger.warning(f"No se encontraron resultados para: {query}")
+                    return None
+
+                # Tomar el primer resultado válido
+                video_info = None
+                for entry in entries:
+                    if entry is not None:
+                        video_info = entry
+                        break
+
+                if video_info is None:
+                    logger.error("Todas las entradas son None")
+                    return None
+
+                info = video_info
+
+            # En este punto, info debería ser la información del video
+            if not isinstance(info, dict):
+                logger.error(f"info no es un diccionario: {type(info)}")
+                return None
+
+            # Obtener título
             title = info.get('title', 'Desconocido')
             duration = info.get('duration')
 
+            logger.info(f"Video encontrado: {title}")
+
+            # Obtener la URL del stream - probar varios métodos
+            url = None
+
+            # Método 1: URL directa
+            if 'url' in info:
+                url = info['url']
+                logger.debug("URL obtenida directamente")
+
+            # Método 2: Buscar en formats
+            elif 'formats' in info and info['formats']:
+                # Buscar el mejor formato de audio
+                formats = info['formats']
+
+                # Preferir formatos de audio solamente
+                audio_formats = [f for f in formats if f.get('vcodec') == 'none' and f.get('url')]
+
+                if audio_formats:
+                    # Ordenar por calidad de audio (abr = audio bitrate)
+                    audio_formats.sort(key=lambda x: x.get('abr', 0), reverse=True)
+                    url = audio_formats[0]['url']
+                    logger.debug(f"URL obtenida de audio formats (abr: {audio_formats[0].get('abr')})")
+                else:
+                    # Si no hay formatos de solo audio, tomar cualquier formato con URL
+                    for fmt in formats:
+                        if fmt.get('url'):
+                            url = fmt['url']
+                            logger.debug("URL obtenida de formats genéricos")
+                            break
+
+            # Método 3: Requested formats
+            elif 'requested_formats' in info and info['requested_formats']:
+                for fmt in info['requested_formats']:
+                    if fmt.get('url'):
+                        url = fmt['url']
+                        logger.debug("URL obtenida de requested_formats")
+                        break
+
+            if not url:
+                logger.error(f"No se pudo obtener URL. Claves disponibles: {list(info.keys())}")
+                return None
+
+            logger.info(f"URL obtenida exitosamente para: {title}")
             return Song(url=url, title=title, duration=duration)
 
+    except yt_dlp.utils.DownloadError as e:
+        logger.error(f"Error de descarga de yt-dlp: {e}")
+        return None
     except Exception as e:
-        logger.error(f"Error al buscar en YouTube: {e}")
+        logger.error(f"Error inesperado al buscar en YouTube: {e}", exc_info=True)
         return None
 
 

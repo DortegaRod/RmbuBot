@@ -1,17 +1,16 @@
 # Discord Bot Dependencies
 
 # Discord.py (versión 2.x con soporte para slash commands)
-discord.py==2.4.0
+discord.py[voice]==2.4.0
 
 # YouTube downloader
 yt-dlp==2024.12.23
 
-# Audio processing
+# Audio processing y encriptación de voz (CRÍTICO para voz)
 PyNaCl==1.5.0
 
 # Environment variables
 python-dotenv==1.0.1
 
-# Optional: para mejor performance
-# aiohttp==3.10.11
-# asyncio==3.4.3
+# FFmpeg wrapper (opcional pero recomendado)
+# Asegúrate de tener FFmpeg instalado en el sistema

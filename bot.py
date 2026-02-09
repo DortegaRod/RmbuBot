@@ -181,6 +181,8 @@ async def on_raw_message_delete(payload: discord.RawMessageDeleteEvent):
 @app_commands.describe(busqueda="Nombre de la canción o enlace de YouTube")
 async def play(interaction: discord.Interaction, busqueda: str):
     """Reproduce música de YouTube."""
+    logger.info(f"/play ejecutado por {interaction.user} con búsqueda: {busqueda}")
+
     # Verificar que el usuario esté en un canal de voz
     if not interaction.user.voice:
         await interaction.response.send_message(
@@ -191,42 +193,88 @@ async def play(interaction: discord.Interaction, busqueda: str):
 
     # Diferir la respuesta porque la búsqueda puede tardar
     await interaction.response.defer()
+    logger.debug("Respuesta diferida")
 
     voice_channel = interaction.user.voice.channel
     guild = interaction.guild
 
     # Obtener el reproductor del servidor
     player = music_manager.get_player(guild)
+    logger.debug(f"Reproductor obtenido para guild {guild.name}")
 
-    # Buscar la canción
-    song = await search_youtube(busqueda)
-    if not song:
-        await interaction.followup.send("❌ No se pudo encontrar la canción.")
-        return
+    try:
+        # Buscar la canción
+        logger.info(f"Iniciando búsqueda de: {busqueda}")
+        song = await search_youtube(busqueda)
 
-    song.requester = interaction.user
-
-    # Conectar al canal de voz si no está conectado
-    voice_client = guild.voice_client
-    if voice_client is None:
-        voice_client = await voice_channel.connect()
-    elif voice_client.channel != voice_channel:
-        await voice_client.move_to(voice_channel)
-
-    # Si no hay nada reproduciéndose, reproducir inmediatamente
-    if not voice_client.is_playing() and not player.current:
-        player.current = song
-        await play_next(voice_client, player)
-        await interaction.followup.send(f"🎶 Reproduciendo: **{song.title}**")
-    else:
-        # Añadir a la cola
-        if player.add_song(song):
-            position = len(player.queue)
+        if not song:
+            logger.warning(f"No se encontró canción para: {busqueda}")
             await interaction.followup.send(
-                f"✅ **{song.title}** añadida a la cola (posición {position})"
+                f"❌ No se pudo encontrar la canción: **{busqueda}**\n"
+                "Intenta con:\n"
+                "• Otro término de búsqueda\n"
+                "• Un enlace directo de YouTube\n"
+                "• Verificar que el video no esté bloqueado"
             )
+            return
+
+        logger.info(f"Canción encontrada: {song.title}")
+        song.requester = interaction.user
+
+        # Conectar al canal de voz si no está conectado
+        voice_client = guild.voice_client
+
+        try:
+            if voice_client is None:
+                logger.info(f"Conectando a {voice_channel.name}")
+                voice_client = await voice_channel.connect()
+                logger.info(f"Conectado a {voice_channel.name} en {guild.name}")
+            elif voice_client.channel != voice_channel:
+                logger.info(f"Moviendo a {voice_channel.name}")
+                await voice_client.move_to(voice_channel)
+                logger.info(f"Movido a {voice_channel.name} en {guild.name}")
+        except discord.errors.ClientException as e:
+            logger.error(f"ClientException al conectar: {e}")
+            await interaction.followup.send(
+                "❌ Ya estoy conectado a otro canal de voz. Usa `/stop` primero."
+            )
+            return
+        except Exception as e:
+            logger.error(f"Error al conectar a voz: {e}", exc_info=True)
+            await interaction.followup.send(
+                "❌ No pude conectarme al canal de voz. Verifica que tenga permisos."
+            )
+            return
+
+        # Si no hay nada reproduciéndose, reproducir inmediatamente
+        if not voice_client.is_playing() and not player.current:
+            logger.info(f"Reproduciendo inmediatamente: {song.title}")
+            player.current = song
+            await play_next(voice_client, player)
+            await interaction.followup.send(f"🎶 Reproduciendo: **{song.title}**")
         else:
-            await interaction.followup.send("❌ La cola está llena.")
+            # Añadir a la cola
+            logger.info(f"Añadiendo a la cola: {song.title}")
+            if player.add_song(song):
+                position = len(player.queue)
+                await interaction.followup.send(
+                    f"✅ **{song.title}** añadida a la cola (posición {position})"
+                )
+            else:
+                logger.warning("Cola llena")
+                await interaction.followup.send("❌ La cola está llena. Usa `/clear` para limpiarla.")
+
+    except discord.errors.ClientException as e:
+        logger.error(f"Error de Discord ClientException: {e}", exc_info=True)
+        await interaction.followup.send(
+            "❌ Ya estoy conectado a otro canal de voz. Usa `/stop` primero."
+        )
+    except Exception as e:
+        logger.error(f"Error inesperado en /play: {e}", exc_info=True)
+        await interaction.followup.send(
+            f"❌ Ocurrió un error inesperado. Por favor, intenta de nuevo.\n"
+            f"Error: {str(e)[:200]}"
+        )
 
 
 @bot.tree.command(name="skip", description="Salta a la siguiente canción")
