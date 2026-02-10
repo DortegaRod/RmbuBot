@@ -9,7 +9,8 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-# Configuración de yt-dlp
+# Configuración de yt-dlp OPTIMIZADA
+# Forzamos IPv4 y clientes móviles para evitar throttles/errores 403 y 4006
 YDL_OPTIONS = {
     'format': 'bestaudio/best',
     'noplaylist': True,
@@ -18,37 +19,36 @@ YDL_OPTIONS = {
     'logtostderr': False,
     'quiet': True,
     'no_warnings': True,
-    'default_search': 'ytsearch',
-    'source_address': '0.0.0.0',
-    'socket_timeout': 30,
+    'default_search': 'auto',
+    'source_address': '0.0.0.0',  # Forzar IPv4
+    'force_ipv4': True,  # Forzar IPv4 explícitamente
+    'socket_timeout': 10,
     'retries': 3,
-    # Opciones adicionales para mayor estabilidad
-    'age_limit': None,
-    'geo_bypass': True,
-    'prefer_insecure': False,
+    'extractor_args': {
+        'youtube': {
+            'player_client': ['android', 'web']
+        }
+    }
 }
 
+# Opciones FFMPEG robustas para evitar cortes
 FFMPEG_OPTIONS = {
-    'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
-    'options': '-vn -loglevel panic'
+    'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 -reconnect_at_eof 1',
+    'options': '-vn'
 }
 
 
 @dataclass
 class Song:
-    """Representa una canción en la cola."""
     url: str
     title: str
     duration: Optional[int] = None
     requester: Optional[discord.Member] = None
 
-    def __str__(self):
-        return self.title
+    def __str__(self): return self.title
 
 
 class MusicPlayer:
-    """Gestor de música para un servidor."""
-
     def __init__(self, guild: discord.Guild):
         self.guild = guild
         self.queue: deque[Song] = deque()
@@ -58,235 +58,142 @@ class MusicPlayer:
         self.inactivity_task: Optional[asyncio.Task] = None
 
     def add_song(self, song: Song) -> bool:
-        """Añade una canción a la cola."""
-        if len(self.queue) >= MAX_QUEUE_SIZE:
-            logger.warning(f"Cola llena en {self.guild.name}")
-            return False
+        if len(self.queue) >= MAX_QUEUE_SIZE: return False
         self.queue.append(song)
-        logger.info(f"Canción añadida a la cola: {song.title}")
         return True
 
-    def skip(self) -> Optional[Song]:
-        """Salta a la siguiente canción."""
-        skipped = self.current
-        self.current = None
-        return skipped
-
-    def clear_queue(self) -> int:
-        """Limpia toda la cola."""
-        count = len(self.queue)
-        self.queue.clear()
-        logger.info(f"Cola limpiada: {count} canciones eliminadas")
-        return count
-
     def get_next(self) -> Optional[Song]:
-        """Obtiene la siguiente canción de la cola."""
-        if self.loop and self.current:
-            return self.current
-        if self.queue:
-            return self.queue.popleft()
+        if self.loop and self.current: return self.current
+        if self.queue: return self.queue.popleft()
         return None
 
-    def toggle_loop(self) -> bool:
-        """Activa/desactiva el modo loop."""
+    def clear_queue(self):
+        self.queue.clear()
+
+    def toggle_loop(self):
+        """Activa o desactiva el bucle."""
         self.loop = not self.loop
         return self.loop
 
 
 class MusicManager:
-    """Gestor global de reproductores de música."""
-
     def __init__(self):
         self.players: Dict[int, MusicPlayer] = {}
 
     def get_player(self, guild: discord.Guild) -> MusicPlayer:
-        """Obtiene o crea un reproductor para un servidor."""
         if guild.id not in self.players:
             self.players[guild.id] = MusicPlayer(guild)
         return self.players[guild.id]
 
     def remove_player(self, guild_id: int):
-        """Elimina un reproductor."""
-        if guild_id in self.players:
-            del self.players[guild_id]
-            logger.info(f"Reproductor eliminado para guild {guild_id}")
+        if guild_id in self.players: del self.players[guild_id]
 
 
-# Instancia global del gestor de música
 music_manager = MusicManager()
 
 
 async def search_youtube(query: str) -> Optional[Song]:
-    """
-    Busca una canción en YouTube.
-
-    Args:
-        query: Búsqueda o URL de YouTube
-
-    Returns:
-        Song si se encuentra, None en caso contrario
-    """
-    logger.info(f"Buscando: {query}")
-
+    """Busca en YouTube usando yt-dlp."""
     try:
-        # Configuración específica para esta búsqueda
-        ydl_opts = YDL_OPTIONS.copy()
+        # Copia de opciones para no modificar la global
+        opts = YDL_OPTIONS.copy()
 
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            # Si no es una URL, buscar en YouTube
-            search_query = query if query.startswith('http') else f"ytsearch1:{query}"
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            # Detectar si es URL o búsqueda
+            if not query.startswith(('http://', 'https://')):
+                query = f"ytsearch:{query}"
 
-            logger.info(f"Ejecutando búsqueda: {search_query}")
+            logger.info(f"Buscando: {query}")
+            info = await asyncio.to_thread(ydl.extract_info, query, download=False)
 
-            # Extraer info
-            info = await asyncio.to_thread(ydl.extract_info, search_query, download=False)
+            if not info: return None
 
-            # Debug: ver qué devolvió yt-dlp
-            if info is None:
-                logger.error("yt-dlp devolvió None")
-                return None
-
-            logger.debug(f"Claves en info: {info.keys() if isinstance(info, dict) else 'No es dict'}")
-
-            # Manejar búsquedas (entries)
+            # Si es una lista de resultados (búsqueda), tomamos el primero
             if 'entries' in info:
-                logger.debug(f"Encontradas {len(info.get('entries', []))} entradas")
+                entries = list(info['entries'])
+                if not entries: return None
+                info = entries[0]
 
-                entries = info['entries']
-                if not entries or len(entries) == 0:
-                    logger.warning(f"No se encontraron resultados para: {query}")
-                    return None
+            url = info.get('url')
+            title = info.get('title', 'Canción desconocida')
 
-                # Tomar el primer resultado válido
-                video_info = None
-                for entry in entries:
-                    if entry is not None:
-                        video_info = entry
-                        break
-
-                if video_info is None:
-                    logger.error("Todas las entradas son None")
-                    return None
-
-                info = video_info
-
-            # En este punto, info debería ser la información del video
-            if not isinstance(info, dict):
-                logger.error(f"info no es un diccionario: {type(info)}")
-                return None
-
-            # Obtener título
-            title = info.get('title', 'Desconocido')
-            duration = info.get('duration')
-
-            logger.info(f"Video encontrado: {title}")
-
-            # Obtener la URL del stream - probar varios métodos
-            url = None
-
-            # Método 1: URL directa
-            if 'url' in info:
-                url = info['url']
-                logger.debug("URL obtenida directamente")
-
-            # Método 2: Buscar en formats
-            elif 'formats' in info and info['formats']:
-                # Buscar el mejor formato de audio
+            # Fallback: Si no hay URL directa, buscar en formatos
+            if not url and 'formats' in info:
+                # Intentar coger el mejor audio
                 formats = info['formats']
-
-                # Preferir formatos de audio solamente
-                audio_formats = [f for f in formats if f.get('vcodec') == 'none' and f.get('url')]
-
-                if audio_formats:
-                    # Ordenar por calidad de audio (abr = audio bitrate)
-                    audio_formats.sort(key=lambda x: x.get('abr', 0), reverse=True)
-                    url = audio_formats[0]['url']
-                    logger.debug(f"URL obtenida de audio formats (abr: {audio_formats[0].get('abr')})")
-                else:
-                    # Si no hay formatos de solo audio, tomar cualquier formato con URL
-                    for fmt in formats:
-                        if fmt.get('url'):
-                            url = fmt['url']
-                            logger.debug("URL obtenida de formats genéricos")
-                            break
-
-            # Método 3: Requested formats
-            elif 'requested_formats' in info and info['requested_formats']:
-                for fmt in info['requested_formats']:
-                    if fmt.get('url'):
-                        url = fmt['url']
-                        logger.debug("URL obtenida de requested_formats")
-                        break
+                # Filtrar solo los que tienen URL
+                valid_formats = [f for f in formats if f.get('url')]
+                if valid_formats:
+                    url = valid_formats[-1]['url']  # El último suele ser mejor calidad en yt-dlp sorted formats
 
             if not url:
-                logger.error(f"No se pudo obtener URL. Claves disponibles: {list(info.keys())}")
+                logger.error("No se encontró URL válida en la info extraída")
                 return None
 
-            logger.info(f"URL obtenida exitosamente para: {title}")
-            return Song(url=url, title=title, duration=duration)
+            return Song(url=url, title=title)
 
-    except yt_dlp.utils.DownloadError as e:
-        logger.error(f"Error de descarga de yt-dlp: {e}")
-        return None
     except Exception as e:
-        logger.error(f"Error inesperado al buscar en YouTube: {e}", exc_info=True)
+        logger.error(f"Error en búsqueda: {e}")
         return None
 
 
 async def play_next(voice_client: discord.VoiceClient, player: MusicPlayer):
-    """Reproduce la siguiente canción en la cola."""
-    if voice_client is None or not voice_client.is_connected():
+    """Lógica recursiva para reproducir la cola."""
+    if not voice_client or not voice_client.is_connected():
         return
 
+    # Cancelar desconexión por inactividad si vamos a reproducir
+    if player.inactivity_task:
+        player.inactivity_task.cancel()
+        player.inactivity_task = None
+
     song = player.get_next()
+
+    # Si no hay canción, iniciamos temporizador de desconexión
     if song is None:
         player.current = None
-        # Iniciar temporizador de inactividad
-        if player.inactivity_task:
-            player.inactivity_task.cancel()
-        player.inactivity_task = asyncio.create_task(
-            inactivity_disconnect(voice_client, player)
-        )
+        player.inactivity_task = asyncio.create_task(inactivity_disconnect(voice_client, player))
         return
 
     player.current = song
+    logger.info(f"Reproduciendo: {song.title}")
 
     try:
-        # Cancelar temporizador de inactividad si existe
-        if player.inactivity_task:
-            player.inactivity_task.cancel()
-            player.inactivity_task = None
-
-        # Crear source de audio
-        source = discord.FFmpegPCMAudio(song.url, **FFMPEG_OPTIONS)
-        source = discord.PCMVolumeTransformer(source, volume=player.volume)
-
-        # Reproducir
-        voice_client.play(
-            source,
-            after=lambda e: asyncio.run_coroutine_threadsafe(
-                play_next(voice_client, player),
-                voice_client.guild._state.loop
-            )
+        source = discord.PCMVolumeTransformer(
+            discord.FFmpegPCMAudio(song.url, **FFMPEG_OPTIONS),
+            volume=player.volume
         )
 
-        logger.info(f"Reproduciendo: {song.title}")
+        def after_playing(error):
+            if error:
+                logger.error(f"Error en reproducción: {error}")
+
+            # Programar la siguiente canción
+            # Usamos el loop del cliente asociado al voice_client
+            if voice_client.is_connected():
+                coro = play_next(voice_client, player)
+                future = asyncio.run_coroutine_threadsafe(coro, voice_client.client.loop)
+                try:
+                    future.result()
+                except Exception as e:
+                    logger.error(f"Error en callback after_playing: {e}")
+
+        voice_client.play(source, after=after_playing)
 
     except Exception as e:
-        logger.error(f"Error al reproducir canción: {e}")
-        # Intentar con la siguiente canción
+        logger.error(f"Error al iniciar audio: {e}")
+        # Si falla, intentamos la siguiente
         await play_next(voice_client, player)
 
 
 async def inactivity_disconnect(voice_client: discord.VoiceClient, player: MusicPlayer):
-    """Desconecta el bot después de un período de inactividad."""
     try:
         await asyncio.sleep(INACTIVITY_TIMEOUT)
-        if voice_client and voice_client.is_connected():
+        if voice_client.is_connected() and not voice_client.is_playing():
             await voice_client.disconnect()
-            logger.info(f"Desconectado por inactividad en {voice_client.guild.name}")
             music_manager.remove_player(voice_client.guild.id)
+            logger.info(f"Desconectado por inactividad en {voice_client.guild.name}")
     except asyncio.CancelledError:
         pass
     except Exception as e:
-        logger.error(f"Error en desconexión por inactividad: {e}")
+        logger.error(f"Error en desconexión automática: {e}")
