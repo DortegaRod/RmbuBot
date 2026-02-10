@@ -2,6 +2,7 @@ import discord
 import asyncio
 import yt_dlp
 import logging
+import random
 from typing import Optional, Dict, List
 from dataclasses import dataclass
 from collections import deque
@@ -9,11 +10,16 @@ from config import MAX_QUEUE_SIZE, INACTIVITY_TIMEOUT
 
 logger = logging.getLogger(__name__)
 
-# Configuración optimizada para Raspberry Pi y Playlists
+# Constantes para el modo de bucle
+LOOP_OFF = 0
+LOOP_CURRENT = 1
+LOOP_QUEUE = 2
+
+# Configuración optimizada
 YDL_OPTIONS = {
     'format': 'bestaudio/best',
-    'noplaylist': False,  # AHORA PERMITIMOS PLAYLISTS
-    'playlistmaxentries': 50,  # Límite para no saturar la RPi
+    'noplaylist': False,
+    'playlistmaxentries': 50,
     'quiet': True,
     'no_warnings': True,
     'default_search': 'ytsearch',
@@ -29,10 +35,10 @@ FFMPEG_OPTIONS = {
 
 @dataclass
 class Song:
-    url: str  # URL del flujo (audio real)
-    title: str  # Título
-    webpage_url: str  # Link de YouTube (para el embed)
-    thumbnail: str  # Miniatura
+    url: str
+    title: str
+    webpage_url: str
+    thumbnail: str
     requester: Optional[discord.Member] = None
 
     def __str__(self): return self.title
@@ -43,6 +49,8 @@ class MusicPlayer:
         self.guild = guild
         self.queue: deque[Song] = deque()
         self.current: Optional[Song] = None
+        # Ahora loop_mode es un número (0, 1, 2) en vez de True/False
+        self.loop_mode = LOOP_OFF
         self.inactivity_task: Optional[asyncio.Task] = None
 
     def add_song(self, song: Song) -> bool:
@@ -51,8 +59,30 @@ class MusicPlayer:
         return True
 
     def get_next(self) -> Optional[Song]:
-        if self.queue: return self.queue.popleft()
+        # Lógica de bucle
+        last_song = self.current
+
+        # 1. Loop Canción Actual: Devolvemos la misma
+        if self.loop_mode == LOOP_CURRENT and last_song:
+            return last_song
+
+        # 2. Loop Cola: La que acaba de terminar se va al final de la fila
+        if self.loop_mode == LOOP_QUEUE and last_song:
+            self.queue.append(last_song)
+
+        # Sacamos la siguiente
+        if self.queue:
+            return self.queue.popleft()
+
         return None
+
+    def shuffle_queue(self):
+        """Mezcla aleatoriamente las canciones en espera."""
+        if len(self.queue) > 0:
+            # Convertir a lista, mezclar y volver a deque
+            temp_list = list(self.queue)
+            random.shuffle(temp_list)
+            self.queue = deque(temp_list)
 
     def clear_queue(self):
         self.queue.clear()
@@ -74,7 +104,6 @@ music_manager = MusicManager()
 
 
 async def search_youtube(query: str) -> List[Song]:
-    """Busca y devuelve una lista de objetos Song."""
     try:
         loop = asyncio.get_event_loop()
 
@@ -86,16 +115,12 @@ async def search_youtube(query: str) -> List[Song]:
         if not info: return []
 
         songs = []
-        # Si es una playlist o búsqueda, 'entries' contiene los videos
         entries = info.get('entries', [info])
 
         for entry in entries:
             if not entry: continue
-
-            # Obtener el stream de audio real
             stream_url = entry.get('url')
             if not stream_url and 'formats' in entry:
-                # Buscar mejor formato de solo audio
                 f_audio = [f for f in entry['formats'] if f.get('vcodec') == 'none' and f.get('url')]
                 if f_audio: stream_url = f_audio[0]['url']
 
@@ -107,7 +132,6 @@ async def search_youtube(query: str) -> List[Song]:
                 webpage_url=entry.get('webpage_url') or f"https://www.youtube.com/watch?v={entry.get('id')}",
                 thumbnail=entry.get('thumbnail', '')
             ))
-
         return songs
     except Exception as e:
         logger.error(f"Error en búsqueda: {e}")
