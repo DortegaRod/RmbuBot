@@ -39,6 +39,26 @@ async def on_ready():
     db.init_db()
 
 
+# --- NUEVO: DETECTOR DE DESCONEXIÓN FORZADA ---
+@bot.event
+async def on_voice_state_update(member, before, after):
+    """
+    Detecta si el bot ha sido desconectado manualmente del canal de voz
+    y limpia su estado interno para evitar errores futuros.
+    """
+    # Solo nos importa si el que cambió de estado es el bot
+    if member.id != bot.user.id:
+        return
+
+    # Si estaba en un canal (before) y ahora no está en ninguno (after es None)
+    if before.channel is not None and after.channel is None:
+        logger.warning(f"⚠️ El bot fue desconectado de {before.channel.name} en {member.guild.name}")
+
+        # Limpiamos el reproductor de música de ese servidor
+        music_manager.remove_player(member.guild.id)
+        logger.info("🧹 Memoria del reproductor limpiada tras desconexión.")
+
+
 # --- EVENTOS DE LOGS ---
 @bot.event
 async def on_message(message: discord.Message):
@@ -102,8 +122,6 @@ async def on_raw_message_delete(payload: discord.RawMessageDeleteEvent):
 # --- COMANDOS MÚSICA ---
 
 def check_music_channel(interaction: discord.Interaction) -> bool:
-    """Verifica si el comando se usa en el canal correcto leyendo desde config."""
-    # Si MUSIC_CHANNEL_ID es 0 o None, permitimos en todos lados (o bloqueamos, según prefieras)
     if not MUSIC_CHANNEL_ID:
         return True
     return interaction.channel_id == MUSIC_CHANNEL_ID
@@ -157,6 +175,8 @@ async def stop(interaction: discord.Interaction):
         )
 
     if interaction.guild.voice_client:
+        # La limpieza se hace automáticamente por el evento on_voice_state_update,
+        # pero forzarla aquí también no hace daño.
         music_manager.remove_player(interaction.guild.id)
         await interaction.guild.voice_client.disconnect()
         await interaction.response.send_message("👋 Adiós")
