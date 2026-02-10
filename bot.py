@@ -3,18 +3,21 @@ from discord.ext import commands
 from discord import app_commands
 import asyncio
 import logging
-from config import TOKEN, ADMIN_LOG_CHANNEL_ID, MUSIC_CHANNEL_ID, INTENTS, AUDIT_WAIT_SECONDS
+from config import TOKEN, ADMIN_LOG_CHANNEL_ID, MUSIC_CHANNEL_ID, INTENTS, AUDIT_WAIT_SECONDS, INACTIVITY_TIMEOUT
 import db
 import cache
 from notifier import send_admin_embed
 from audit import find_audit_entry_for_channel
 from music import music_manager, search_youtube, play_next
 
-# Logging visible en consola
+# Logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# INTENTS
+# Diccionario para gestionar los timers de desconexión por canal vacío
+# guild_id -> task
+empty_channel_timers = {}
+
 intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
@@ -35,17 +38,60 @@ bot = MusicBot()
 @bot.event
 async def on_ready():
     logger.info(f"✅ Bot conectado como {bot.user}")
-    logger.info(f"🎵 Canal de música configurado: {MUSIC_CHANNEL_ID}")
     db.init_db()
 
 
+# --- DETECTOR DE ESTADO DE VOZ (MEJORADO) ---
 @bot.event
 async def on_voice_state_update(member, before, after):
-    if member.id != bot.user.id:
+    guild_id = member.guild.id
+    vc = member.guild.voice_client
+
+    # 1. Si el bot es desconectado manualmente
+    if member.id == bot.user.id and after.channel is None:
+        logger.warning(f"⚠️ Bot desconectado manualmente en {member.guild.name}")
+        if guild_id in empty_channel_timers:
+            empty_channel_timers[guild_id].cancel()
+            del empty_channel_timers[guild_id]
+        music_manager.remove_player(guild_id)
         return
-    if before.channel is not None and after.channel is None:
-        logger.warning(f"⚠️ El bot fue desconectado de {member.guild.name}")
-        music_manager.remove_player(member.guild.id)
+
+    # 2. Lógica de "Canal Vacío"
+    if vc and vc.channel:
+        # Contamos cuántos humanos hay (excluyendo bots)
+        human_members = [m for m in vc.channel.members if not m.bot]
+
+        if len(human_members) == 0:
+            # Si no hay humanos y no hay un timer ya corriendo, lo iniciamos
+            if guild_id not in empty_channel_timers:
+                logger.info(f"🔇 Canal vacío en {vc.channel.name}. Iniciando cuenta atrás de {INACTIVITY_TIMEOUT}s")
+                empty_channel_timers[guild_id] = asyncio.create_task(
+                    disconnect_if_empty(member.guild, vc)
+                )
+        else:
+            # Si alguien entra (hay humanos) y había un timer, lo cancelamos
+            if guild_id in empty_channel_timers:
+                logger.info(f"👤 Alguien ha vuelto al canal en {vc.channel.name}. Timer cancelado.")
+                empty_channel_timers[guild_id].cancel()
+                del empty_channel_timers[guild_id]
+
+
+async def disconnect_if_empty(guild, vc):
+    """Tarea que espera el tiempo de inactividad y desconecta el bot."""
+    try:
+        await asyncio.sleep(INACTIVITY_TIMEOUT)
+        if vc and vc.is_connected():
+            logger.info(f"⏰ Tiempo agotado. Desconectando de {vc.channel.name} por inactividad.")
+            # Limpiamos música y desconectamos
+            music_manager.remove_player(guild.id)
+            await vc.disconnect()
+    except asyncio.CancelledError:
+        # El timer fue cancelado porque alguien entró
+        pass
+    finally:
+        # Limpiar el diccionario al terminar
+        if guild.id in empty_channel_timers:
+            del empty_channel_timers[guild.id]
 
 
 # --- EVENTOS DE LOGS ---
@@ -53,10 +99,7 @@ async def on_voice_state_update(member, before, after):
 async def on_message(message: discord.Message):
     if message.author.bot or not message.guild: return
     try:
-        content = message.content
-        if not content and message.embeds: content = "[Embed]"
-        if message.attachments: content += f" [Adjunto: {message.attachments[0].filename}]"
-
+        content = message.content or ("[Embed]" if message.embeds else "[Sin contenido]")
         db.save_message(message.id, message.author.id, content, message.channel.id)
         cache.cache_message(message.id, message.author.id, content)
     except Exception as e:
@@ -72,8 +115,7 @@ async def on_raw_message_delete(payload: discord.RawMessageDeleteEvent):
     if not content:
         rec = db.get_message(payload.message_id)
         if rec:
-            content = rec['content']
-            author_id = rec['author_id']
+            content, author_id = rec['content'], rec['author_id']
     if not content: return
 
     await asyncio.sleep(AUDIT_WAIT_SECONDS)
@@ -111,16 +153,15 @@ async def play(interaction: discord.Interaction, busqueda: str):
         return await interaction.response.send_message("❌ Entra a un canal de voz primero.", ephemeral=True)
 
     await interaction.response.defer()
-
     song = await search_youtube(busqueda)
     if not song:
         return await interaction.followup.send("❌ No encontré esa canción.")
 
-    # Conexión
     guild = interaction.guild
     voice_channel = interaction.user.voice.channel
     player = music_manager.get_player(guild)
     vc = guild.voice_client
+
     try:
         if not vc:
             vc = await voice_channel.connect(self_deaf=True)
@@ -132,34 +173,18 @@ async def play(interaction: discord.Interaction, busqueda: str):
     song.requester = interaction.user
     player.add_song(song)
 
-    # Determinar si reproducimos o encolamos
     is_playing_now = False
     if not vc.is_playing() and not player.current:
         await play_next(vc, player)
         is_playing_now = True
 
-    # --- CREACIÓN DEL EMBED BONITO ---
-    if is_playing_now:
-        embed_title = "🎶 Reproduciendo ahora"
-        embed_color = discord.Color.green()
-    else:
-        embed_title = "📝 Añadido a la cola"
-        embed_color = discord.Color.blue()
-
     embed = discord.Embed(
-        title=embed_title,
+        title="🎶 Reproduciendo ahora" if is_playing_now else "📝 Añadido a la cola",
         description=f"**[{song.title}]({song.webpage_url})**",
-        color=embed_color
+        color=discord.Color.green() if is_playing_now else discord.Color.blue()
     )
-
-    if song.thumbnail:
-        embed.set_thumbnail(url=song.thumbnail)
-
-    if song.requester:
-        embed.set_footer(
-            text=f"Solicitado por {song.requester.display_name}",
-            icon_url=song.requester.display_avatar.url
-        )
+    if song.thumbnail: embed.set_thumbnail(url=song.thumbnail)
+    embed.set_footer(text=f"Pedido por {interaction.user.display_name}", icon_url=interaction.user.display_avatar.url)
 
     await interaction.followup.send(embed=embed)
 
