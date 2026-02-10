@@ -12,7 +12,9 @@ logger = logging.getLogger(__name__)
 # Configuración crítica para Raspberry Pi
 YDL_OPTIONS = {
     'format': 'bestaudio/best',
-    'noplaylist': True,
+    'noplaylist': False,
+    'playlistmaxentries': 100,
+    'extract_flat': 'in_playlist',
     'quiet': True,
     'no_warnings': True,
     'default_search': 'ytsearch',
