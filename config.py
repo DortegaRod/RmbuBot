@@ -11,6 +11,10 @@ if not TOKEN:
 
 ADMIN_LOG_CHANNEL_ID = int(os.environ.get("ADMIN_LOG_CHANNEL_ID", 0))
 
+# --- NUEVO: Canal de Música ---
+# Si no está en el .env, ponemos 0 (así fallará seguro si no se configura)
+MUSIC_CHANNEL_ID = int(os.environ.get("MUSIC_CHANNEL_ID", 0))
+
 # Cache Configuration
 CACHE_MAX = int(os.environ.get("CACHE_MAX", 5000))
 
@@ -27,10 +31,10 @@ INTENTS = {
     "messages": True,
     "message_content": True,
     "members": True,
-    "voice_states": True,  # Necesario para música
+    "voice_states": True,
 }
 
 # Music Configuration
 MAX_QUEUE_SIZE = int(os.environ.get("MAX_QUEUE_SIZE", 50))
 DEFAULT_VOLUME = float(os.environ.get("DEFAULT_VOLUME", 0.5))
-INACTIVITY_TIMEOUT = int(os.environ.get("INACTIVITY_TIMEOUT", 300))  # 5 minutos
+INACTIVITY_TIMEOUT = int(os.environ.get("INACTIVITY_TIMEOUT", 300))

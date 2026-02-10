@@ -3,7 +3,7 @@ from discord.ext import commands
 from discord import app_commands
 import asyncio
 import logging
-from config import TOKEN, ADMIN_LOG_CHANNEL_ID, INTENTS, AUDIT_WAIT_SECONDS
+from config import TOKEN, ADMIN_LOG_CHANNEL_ID, MUSIC_CHANNEL_ID, INTENTS, AUDIT_WAIT_SECONDS
 import db
 import cache
 from notifier import send_admin_embed
@@ -35,6 +35,7 @@ bot = MusicBot()
 @bot.event
 async def on_ready():
     logger.info(f"✅ Bot conectado como {bot.user}")
+    logger.info(f"🎵 Canal de música configurado: {MUSIC_CHANNEL_ID}")
     db.init_db()
 
 
@@ -58,7 +59,6 @@ async def on_message(message: discord.Message):
 async def on_raw_message_delete(payload: discord.RawMessageDeleteEvent):
     if not payload.guild_id: return
 
-    # Recuperar contenido
     cached = cache.get_cached(payload.message_id)
     content = cached[1] if cached else None
     author_id = cached[0] if cached else None
@@ -71,7 +71,6 @@ async def on_raw_message_delete(payload: discord.RawMessageDeleteEvent):
 
     if not content: return
 
-    # Esperar audit log
     await asyncio.sleep(AUDIT_WAIT_SECONDS)
 
     try:
@@ -79,7 +78,6 @@ async def on_raw_message_delete(payload: discord.RawMessageDeleteEvent):
         admin_channel = guild.get_channel(ADMIN_LOG_CHANNEL_ID)
         if not admin_channel: return
 
-        # Buscar quién lo borró
         entry = await find_audit_entry_for_channel(guild, payload.channel_id)
         executor = entry.user if entry else None
 
@@ -101,20 +99,32 @@ async def on_raw_message_delete(payload: discord.RawMessageDeleteEvent):
         logger.error(f"Error enviando log: {e}")
 
 
-# --- COMANDOS MÚSICA (CORREGIDO) ---
+# --- COMANDOS MÚSICA ---
+
+def check_music_channel(interaction: discord.Interaction) -> bool:
+    """Verifica si el comando se usa en el canal correcto leyendo desde config."""
+    # Si MUSIC_CHANNEL_ID es 0 o None, permitimos en todos lados (o bloqueamos, según prefieras)
+    if not MUSIC_CHANNEL_ID:
+        return True
+    return interaction.channel_id == MUSIC_CHANNEL_ID
+
+
 @bot.tree.command(name="play", description="Reproduce música")
 async def play(interaction: discord.Interaction, busqueda: str):
+    if not check_music_channel(interaction):
+        return await interaction.response.send_message(
+            f"❌ Comandos de música solo en <#{MUSIC_CHANNEL_ID}>", ephemeral=True
+        )
+
     if not interaction.user.voice:
         return await interaction.response.send_message("❌ Entra a un canal de voz primero.", ephemeral=True)
 
     await interaction.response.defer()
 
-    # 1. Buscar
     song = await search_youtube(busqueda)
     if not song:
         return await interaction.followup.send("❌ No encontré esa canción.")
 
-    # 2. Conectar
     guild = interaction.guild
     voice_channel = interaction.user.voice.channel
     player = music_manager.get_player(guild)
@@ -129,23 +139,23 @@ async def play(interaction: discord.Interaction, busqueda: str):
         logger.error(f"Error conectando: {e}")
         return await interaction.followup.send("❌ Error de conexión.")
 
-    # 3. Reproducir (LÓGICA CORREGIDA AQUÍ)
     song.requester = interaction.user
-
-    # Siempre añadimos a la cola primero, para que play_next la encuentre
     player.add_song(song)
 
     if not vc.is_playing() and not player.current:
-        # Si no suena nada, iniciamos la cadena
         await play_next(vc, player)
         await interaction.followup.send(f"▶️ Reproduciendo: **{song.title}**")
     else:
-        # Si ya suena algo, solo avisamos que se añadió
         await interaction.followup.send(f"📝 Añadido a la cola: **{song.title}**")
 
 
 @bot.tree.command(name="stop", description="Desconectar")
 async def stop(interaction: discord.Interaction):
+    if not check_music_channel(interaction):
+        return await interaction.response.send_message(
+            f"❌ Comandos de música solo en <#{MUSIC_CHANNEL_ID}>", ephemeral=True
+        )
+
     if interaction.guild.voice_client:
         music_manager.remove_player(interaction.guild.id)
         await interaction.guild.voice_client.disconnect()
@@ -156,6 +166,11 @@ async def stop(interaction: discord.Interaction):
 
 @bot.tree.command(name="skip", description="Saltar canción")
 async def skip(interaction: discord.Interaction):
+    if not check_music_channel(interaction):
+        return await interaction.response.send_message(
+            f"❌ Comandos de música solo en <#{MUSIC_CHANNEL_ID}>", ephemeral=True
+        )
+
     vc = interaction.guild.voice_client
     if vc and vc.is_playing():
         vc.stop()
