@@ -14,9 +14,9 @@ from music import music_manager, search_youtube, play_next
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# INTENTS: Esto debe coincidir con lo que activaste en el portal
+# INTENTS
 intents = discord.Intents.default()
-intents.message_content = True  # ¡CRUCIAL PARA LOGS!
+intents.message_content = True
 intents.members = True
 intents.voice_states = True
 
@@ -43,9 +43,6 @@ async def on_ready():
 async def on_message(message: discord.Message):
     if message.author.bot or not message.guild: return
 
-    # Debug para ver si llegan mensajes
-    # logger.info(f"Mensaje recibido de {message.author}: {message.content}")
-
     try:
         content = message.content
         if not content and message.embeds: content = "[Embed]"
@@ -60,7 +57,6 @@ async def on_message(message: discord.Message):
 @bot.event
 async def on_raw_message_delete(payload: discord.RawMessageDeleteEvent):
     if not payload.guild_id: return
-    logger.info("🗑️ Mensaje eliminado detectado")
 
     # Recuperar contenido
     cached = cache.get_cached(payload.message_id)
@@ -73,7 +69,7 @@ async def on_raw_message_delete(payload: discord.RawMessageDeleteEvent):
             content = rec['content']
             author_id = rec['author_id']
 
-    if not content: return  # No sabemos qué decía
+    if not content: return
 
     # Esperar audit log
     await asyncio.sleep(AUDIT_WAIT_SECONDS)
@@ -81,15 +77,12 @@ async def on_raw_message_delete(payload: discord.RawMessageDeleteEvent):
     try:
         guild = bot.get_guild(payload.guild_id)
         admin_channel = guild.get_channel(ADMIN_LOG_CHANNEL_ID)
-        if not admin_channel:
-            logger.warning("Canal de logs no encontrado")
-            return
+        if not admin_channel: return
 
         # Buscar quién lo borró
         entry = await find_audit_entry_for_channel(guild, payload.channel_id)
         executor = entry.user if entry else None
 
-        # Ignorar auto-borrado
         if author_id and executor and executor.id == author_id: return
 
         author_display = f"<@{author_id}>" if author_id else "Desconocido"
@@ -104,52 +97,51 @@ async def on_raw_message_delete(payload: discord.RawMessageDeleteEvent):
             content=content,
             message_id=payload.message_id
         )
-        logger.info("✅ Log enviado al canal admin")
     except Exception as e:
         logger.error(f"Error enviando log: {e}")
 
 
-# --- COMANDOS MÚSICA ---
+# --- COMANDOS MÚSICA (CORREGIDO) ---
 @bot.tree.command(name="play", description="Reproduce música")
 async def play(interaction: discord.Interaction, busqueda: str):
     if not interaction.user.voice:
         return await interaction.response.send_message("❌ Entra a un canal de voz primero.", ephemeral=True)
 
-    # 1. Avisar que estamos procesando
     await interaction.response.defer()
-    logger.info(f"Comando play recibido: {busqueda}")
 
+    # 1. Buscar
+    song = await search_youtube(busqueda)
+    if not song:
+        return await interaction.followup.send("❌ No encontré esa canción.")
+
+    # 2. Conectar
+    guild = interaction.guild
+    voice_channel = interaction.user.voice.channel
+    player = music_manager.get_player(guild)
+
+    vc = guild.voice_client
     try:
-        # 2. Buscar ANTES de conectar (para no entrar y salir si falla)
-        song = await search_youtube(busqueda)
-        if not song:
-            return await interaction.followup.send("❌ No encontré esa canción o YouTube bloqueó la búsqueda.")
-
-        # 3. Conectar
-        guild = interaction.guild
-        voice_channel = interaction.user.voice.channel
-        player = music_manager.get_player(guild)
-
-        vc = guild.voice_client
         if not vc:
-            # self_deaf=True es vital para evitar bugs de conexión
             vc = await voice_channel.connect(self_deaf=True)
         elif vc.channel != voice_channel:
             await vc.move_to(voice_channel)
-
-        # 4. Reproducir
-        song.requester = interaction.user
-        if not vc.is_playing() and not player.current:
-            player.current = song
-            await play_next(vc, player)
-            await interaction.followup.send(f"▶️ Reproduciendo: **{song.title}**")
-        else:
-            player.add_song(song)
-            await interaction.followup.send(f"📝 Añadido a la cola: **{song.title}**")
-
     except Exception as e:
-        logger.error(f"Error en comando play: {e}")
-        await interaction.followup.send("❌ Hubo un error interno.")
+        logger.error(f"Error conectando: {e}")
+        return await interaction.followup.send("❌ Error de conexión.")
+
+    # 3. Reproducir (LÓGICA CORREGIDA AQUÍ)
+    song.requester = interaction.user
+
+    # Siempre añadimos a la cola primero, para que play_next la encuentre
+    player.add_song(song)
+
+    if not vc.is_playing() and not player.current:
+        # Si no suena nada, iniciamos la cadena
+        await play_next(vc, player)
+        await interaction.followup.send(f"▶️ Reproduciendo: **{song.title}**")
+    else:
+        # Si ya suena algo, solo avisamos que se añadió
+        await interaction.followup.send(f"📝 Añadido a la cola: **{song.title}**")
 
 
 @bot.tree.command(name="stop", description="Desconectar")
@@ -160,6 +152,16 @@ async def stop(interaction: discord.Interaction):
         await interaction.response.send_message("👋 Adiós")
     else:
         await interaction.response.send_message("❌ No estoy conectado", ephemeral=True)
+
+
+@bot.tree.command(name="skip", description="Saltar canción")
+async def skip(interaction: discord.Interaction):
+    vc = interaction.guild.voice_client
+    if vc and vc.is_playing():
+        vc.stop()
+        await interaction.response.send_message("⏭️ Saltada")
+    else:
+        await interaction.response.send_message("❌ No hay nada sonando", ephemeral=True)
 
 
 if __name__ == '__main__':
