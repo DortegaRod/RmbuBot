@@ -9,9 +9,7 @@ from config import MAX_QUEUE_SIZE, INACTIVITY_TIMEOUT
 
 logger = logging.getLogger(__name__)
 
-# Configuración crítica para Raspberry Pi:
-# 1. source_address 0.0.0.0 fuerza IPv4 (evita errores de red comunes)
-# 2. noplaylist evita que se cuelgue intentando bajar listas enteras
+# Configuración crítica para Raspberry Pi
 YDL_OPTIONS = {
     'format': 'bestaudio/best',
     'noplaylist': True,
@@ -23,7 +21,6 @@ YDL_OPTIONS = {
     'socket_timeout': 10
 }
 
-# Configuración FFmpeg para evitar cortes
 FFMPEG_OPTIONS = {
     'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
     'options': '-vn'
@@ -32,8 +29,10 @@ FFMPEG_OPTIONS = {
 
 @dataclass
 class Song:
-    url: str
-    title: str
+    url: str  # URL del stream de audio (interno)
+    title: str  # Título
+    webpage_url: str  # URL original de YouTube (para el click)
+    thumbnail: str  # URL de la imagen/carátula
     requester: Optional[discord.Member] = None
 
     def __str__(self): return self.title
@@ -81,23 +80,21 @@ async def search_youtube(query: str) -> Optional[Song]:
         loop = asyncio.get_event_loop()
 
         def extract():
-            # Creamos una instancia nueva cada vez para limpiar caché
             with yt_dlp.YoutubeDL(YDL_OPTIONS) as ydl:
                 return ydl.extract_info(query, download=False)
 
-        # Ejecutamos en un hilo aparte para no congelar el bot
         logger.info(f"Iniciando búsqueda en YT: {query}")
         info = await loop.run_in_executor(None, extract)
 
         if not info: return None
         if 'entries' in info: info = info['entries'][0]
 
-        url = info.get('url')
-        title = info.get('title', 'Canción desconocida')
-
-        if not url: return None
-        logger.info(f"URL encontrada: {title}")
-        return Song(url=url, title=title)
+        return Song(
+            url=info.get('url'),
+            title=info.get('title', 'Canción desconocida'),
+            webpage_url=info.get('webpage_url', ''),  # Guardamos el link original
+            thumbnail=info.get('thumbnail', '')  # Guardamos la foto
+        )
 
     except Exception as e:
         logger.error(f"Error al buscar en YouTube: {e}")
@@ -122,7 +119,6 @@ async def play_next(voice_client: discord.VoiceClient, player: MusicPlayer):
     logger.info(f"Reproduciendo: {song.title}")
 
     try:
-        # Usamos FFmpegPCMAudio directo (más estable en RPi)
         source = discord.FFmpegPCMAudio(song.url, **FFMPEG_OPTIONS)
 
         def after_playing(error):
