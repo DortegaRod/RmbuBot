@@ -2,25 +2,23 @@ import discord
 import asyncio
 import yt_dlp
 import logging
-from typing import Optional, Dict
+from typing import Optional, Dict, List
 from dataclasses import dataclass
 from collections import deque
 from config import MAX_QUEUE_SIZE, INACTIVITY_TIMEOUT
 
 logger = logging.getLogger(__name__)
 
-# Configuración crítica para Raspberry Pi
+# Configuración optimizada para Raspberry Pi y Playlists
 YDL_OPTIONS = {
     'format': 'bestaudio/best',
-    'noplaylist': False,
-    'playlistmaxentries': 100,
-    'extract_flat': 'in_playlist',
+    'noplaylist': False,  # AHORA PERMITIMOS PLAYLISTS
+    'playlistmaxentries': 50,  # Límite para no saturar la RPi
     'quiet': True,
     'no_warnings': True,
     'default_search': 'ytsearch',
     'source_address': '0.0.0.0',
     'force_ipv4': True,
-    'socket_timeout': 10
 }
 
 FFMPEG_OPTIONS = {
@@ -31,10 +29,10 @@ FFMPEG_OPTIONS = {
 
 @dataclass
 class Song:
-    url: str  # URL del stream de audio (interno)
+    url: str  # URL del flujo (audio real)
     title: str  # Título
-    webpage_url: str  # URL original de YouTube (para el click)
-    thumbnail: str  # URL de la imagen/carátula
+    webpage_url: str  # Link de YouTube (para el embed)
+    thumbnail: str  # Miniatura
     requester: Optional[discord.Member] = None
 
     def __str__(self): return self.title
@@ -45,7 +43,6 @@ class MusicPlayer:
         self.guild = guild
         self.queue: deque[Song] = deque()
         self.current: Optional[Song] = None
-        self.loop = False
         self.inactivity_task: Optional[asyncio.Task] = None
 
     def add_song(self, song: Song) -> bool:
@@ -54,7 +51,6 @@ class MusicPlayer:
         return True
 
     def get_next(self) -> Optional[Song]:
-        if self.loop and self.current: return self.current
         if self.queue: return self.queue.popleft()
         return None
 
@@ -77,7 +73,8 @@ class MusicManager:
 music_manager = MusicManager()
 
 
-async def search_youtube(query: str) -> Optional[Song]:
+async def search_youtube(query: str) -> List[Song]:
+    """Busca y devuelve una lista de objetos Song."""
     try:
         loop = asyncio.get_event_loop()
 
@@ -85,57 +82,57 @@ async def search_youtube(query: str) -> Optional[Song]:
             with yt_dlp.YoutubeDL(YDL_OPTIONS) as ydl:
                 return ydl.extract_info(query, download=False)
 
-        logger.info(f"Iniciando búsqueda en YT: {query}")
         info = await loop.run_in_executor(None, extract)
+        if not info: return []
 
-        if not info: return None
-        if 'entries' in info: info = info['entries'][0]
+        songs = []
+        # Si es una playlist o búsqueda, 'entries' contiene los videos
+        entries = info.get('entries', [info])
 
-        return Song(
-            url=info.get('url'),
-            title=info.get('title', 'Canción desconocida'),
-            webpage_url=info.get('webpage_url', ''),  # Guardamos el link original
-            thumbnail=info.get('thumbnail', '')  # Guardamos la foto
-        )
+        for entry in entries:
+            if not entry: continue
 
+            # Obtener el stream de audio real
+            stream_url = entry.get('url')
+            if not stream_url and 'formats' in entry:
+                # Buscar mejor formato de solo audio
+                f_audio = [f for f in entry['formats'] if f.get('vcodec') == 'none' and f.get('url')]
+                if f_audio: stream_url = f_audio[0]['url']
+
+            if not stream_url: continue
+
+            songs.append(Song(
+                url=stream_url,
+                title=entry.get('title', 'Desconocido'),
+                webpage_url=entry.get('webpage_url') or f"https://www.youtube.com/watch?v={entry.get('id')}",
+                thumbnail=entry.get('thumbnail', '')
+            ))
+
+        return songs
     except Exception as e:
-        logger.error(f"Error al buscar en YouTube: {e}")
-        return None
+        logger.error(f"Error en búsqueda: {e}")
+        return []
 
 
 async def play_next(voice_client: discord.VoiceClient, player: MusicPlayer):
     if not voice_client or not voice_client.is_connected(): return
-
     if player.inactivity_task:
         player.inactivity_task.cancel()
         player.inactivity_task = None
 
     song = player.get_next()
-
     if song is None:
         player.current = None
         player.inactivity_task = asyncio.create_task(inactivity_disconnect(voice_client, player))
         return
 
     player.current = song
-    logger.info(f"Reproduciendo: {song.title}")
-
     try:
         source = discord.FFmpegPCMAudio(song.url, **FFMPEG_OPTIONS)
-
-        def after_playing(error):
-            if error: logger.error(f"Error de reproducción: {error}")
-            if voice_client.is_connected():
-                fut = asyncio.run_coroutine_threadsafe(play_next(voice_client, player), voice_client.client.loop)
-                try:
-                    fut.result()
-                except:
-                    pass
-
-        voice_client.play(source, after=after_playing)
-
+        voice_client.play(source, after=lambda e: asyncio.run_coroutine_threadsafe(play_next(voice_client, player),
+                                                                                   voice_client.client.loop))
     except Exception as e:
-        logger.error(f"Error crítico audio: {e}")
+        logger.error(f"Error audio: {e}")
         await play_next(voice_client, player)
 
 
