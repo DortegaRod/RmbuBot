@@ -10,10 +10,9 @@ from notifier import send_admin_embed
 from audit import find_audit_entry_for_channel
 from music import music_manager, search_youtube, play_next, LOOP_OFF, LOOP_CURRENT, LOOP_QUEUE
 
+# CONFIGURACIÓN INICIAL
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
-
-empty_channel_timers = {}
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -32,6 +31,7 @@ class MusicBot(commands.Bot):
 bot = MusicBot()
 
 
+# --- EVENTOS ---
 @bot.event
 async def on_ready():
     logger.info(f"✅ Bot conectado como {bot.user}")
@@ -43,36 +43,15 @@ async def on_voice_state_update(member, before, after):
     guild_id = member.guild.id
     vc = member.guild.voice_client
 
+    # 1. Bot desconectado manualmente
     if member.id == bot.user.id and after.channel is None:
-        if guild_id in empty_channel_timers:
-            empty_channel_timers[guild_id].cancel()
-            del empty_channel_timers[guild_id]
         music_manager.remove_player(guild_id)
         return
 
-    if vc and vc.channel:
-        human_members = [m for m in vc.channel.members if not m.bot]
-
-        if len(human_members) == 0:
-            if guild_id not in empty_channel_timers:
-                empty_channel_timers[guild_id] = asyncio.create_task(disconnect_if_empty(member.guild, vc))
-        else:
-            if guild_id in empty_channel_timers:
-                empty_channel_timers[guild_id].cancel()
-                del empty_channel_timers[guild_id]
-
-
-async def disconnect_if_empty(guild, vc):
-    try:
-        await asyncio.sleep(INACTIVITY_TIMEOUT)
-        if vc and vc.is_connected():
-            music_manager.remove_player(guild.id)
-            await vc.disconnect()
-    except asyncio.CancelledError:
+    # 2. Canal Vacío (Lógica simplificada)
+    if vc and vc.channel and len([m for m in vc.channel.members if not m.bot]) == 0:
+        # Si se queda solo, desconectar tras timeout (opcional, o inmediato)
         pass
-    finally:
-        if guild.id in empty_channel_timers:
-            del empty_channel_timers[guild.id]
 
 
 @bot.event
@@ -118,11 +97,12 @@ async def on_raw_message_delete(payload: discord.RawMessageDeleteEvent):
         logger.error(f"Error enviando log: {e}")
 
 
+# --- COMANDOS MÚSICA ---
 def check_music_channel(interaction: discord.Interaction) -> bool:
     return not MUSIC_CHANNEL_ID or interaction.channel_id == MUSIC_CHANNEL_ID
 
 
-@bot.tree.command(name="play", description="Reproduce música o playlists de YouTube")
+@bot.tree.command(name="play", description="Reproduce música o playlists")
 async def play(interaction: discord.Interaction, busqueda: str):
     if not check_music_channel(interaction):
         return await interaction.response.send_message(f"❌ Solo en <#{MUSIC_CHANNEL_ID}>", ephemeral=True)
@@ -130,7 +110,6 @@ async def play(interaction: discord.Interaction, busqueda: str):
         return await interaction.response.send_message("❌ Entra a un canal de voz primero.", ephemeral=True)
 
     await interaction.response.defer()
-
     songs = await search_youtube(busqueda)
     if not songs:
         return await interaction.followup.send("❌ No encontré resultados.")
@@ -138,8 +117,8 @@ async def play(interaction: discord.Interaction, busqueda: str):
     guild = interaction.guild
     voice_channel = interaction.user.voice.channel
     player = music_manager.get_player(guild)
-
     vc = guild.voice_client
+
     try:
         if not vc:
             vc = await voice_channel.connect(self_deaf=True)
@@ -158,8 +137,7 @@ async def play(interaction: discord.Interaction, busqueda: str):
         is_playing_now = True
 
     if len(songs) > 1:
-        embed = discord.Embed(title="📂 Playlist Añadida",
-                              description=f"Se han añadido **{len(songs)}** canciones a la cola.",
+        embed = discord.Embed(title="📂 Playlist Añadida", description=f"Se han añadido **{len(songs)}** canciones.",
                               color=discord.Color.purple())
     else:
         s = songs[0]
@@ -176,4 +154,78 @@ async def play(interaction: discord.Interaction, busqueda: str):
 
 @bot.tree.command(name="loop", description="Configura el modo de repetición")
 @app_commands.choices(modo=[
-    app_commands.Choice(name
+    app_commands.Choice(name="⛔ Desactivado", value=0),
+    app_commands.Choice(name="🔂 Canción Actual", value=1),
+    app_commands.Choice(name="🔁 Toda la Cola", value=2)
+])
+async def loop(interaction: discord.Interaction, modo: app_commands.Choice[int]):
+    if not check_music_channel(interaction):
+        return await interaction.response.send_message(f"❌ Solo en <#{MUSIC_CHANNEL_ID}>", ephemeral=True)
+
+    player = music_manager.get_player(interaction.guild)
+    player.loop_mode = modo.value
+
+    msgs = {0: "Modo bucle **desactivado**.", 1: "🔂 Bucle: **Canción Actual**.", 2: "🔁 Bucle: **Toda la Cola**."}
+    await interaction.response.send_message(msgs[modo.value])
+
+
+@bot.tree.command(name="shuffle", description="Mezcla aleatoriamente la cola")
+async def shuffle(interaction: discord.Interaction):
+    if not check_music_channel(interaction):
+        return await interaction.response.send_message(f"❌ Solo en <#{MUSIC_CHANNEL_ID}>", ephemeral=True)
+
+    player = music_manager.get_player(interaction.guild)
+    if len(player.queue) < 2:
+        return await interaction.response.send_message("❌ Necesitas al menos 2 canciones en la cola.", ephemeral=True)
+
+    player.shuffle_queue()
+    await interaction.response.send_message("🔀 **Cola mezclada** aleatoriamente.")
+
+
+@bot.tree.command(name="skip", description="Salta la canción")
+async def skip(interaction: discord.Interaction):
+    if not check_music_channel(interaction): return await interaction.response.send_message(
+        f"❌ Solo en <#{MUSIC_CHANNEL_ID}>", ephemeral=True)
+    vc = interaction.guild.voice_client
+    if vc and vc.is_playing():
+        vc.stop()
+        await interaction.response.send_message("⏭️ Saltada")
+    else:
+        await interaction.response.send_message("❌ Nada sonando.", ephemeral=True)
+
+
+@bot.tree.command(name="stop", description="Desconectar")
+async def stop(interaction: discord.Interaction):
+    if not check_music_channel(interaction): return await interaction.response.send_message(
+        f"❌ Solo en <#{MUSIC_CHANNEL_ID}>", ephemeral=True)
+    if interaction.guild.voice_client:
+        music_manager.remove_player(interaction.guild.id)
+        await interaction.guild.voice_client.disconnect()
+        await interaction.response.send_message("👋 Adiós")
+    else:
+        await interaction.response.send_message("❌ No conectado", ephemeral=True)
+
+
+@bot.tree.command(name="queue", description="Ver la cola")
+async def queue(interaction: discord.Interaction):
+    player = music_manager.get_player(interaction.guild)
+    if not player.queue and not player.current:
+        return await interaction.response.send_message("Cola vacía.")
+
+    desc = ""
+    if player.current:
+        desc += f"▶️ **{player.current.title}**\n\n"
+
+    for i, s in enumerate(list(player.queue)[:10], 1):
+        desc += f"`{i}.` {s.title}\n"
+
+    if len(player.queue) > 10: desc += f"\n...y {len(player.queue) - 10} más"
+
+    modes = {0: "Off", 1: "🔂 Canción", 2: "🔁 Cola"}
+    embed = discord.Embed(title="🎵 Cola de Reproducción", description=desc, color=discord.Color.blue())
+    embed.set_footer(text=f"Modo Bucle: {modes[player.loop_mode]} | Total: {len(player.queue)}")
+    await interaction.response.send_message(embed=embed)
+
+
+if __name__ == '__main__':
+    bot.run(TOKEN)
