@@ -1,219 +1,179 @@
 import discord
+from discord.ext import commands
+from discord import app_commands
 import asyncio
-import yt_dlp
 import logging
-import random
-from typing import Optional, Dict, List
-from dataclasses import dataclass
-from collections import deque
-from config import MAX_QUEUE_SIZE, INACTIVITY_TIMEOUT
+from config import TOKEN, ADMIN_LOG_CHANNEL_ID, MUSIC_CHANNEL_ID, INTENTS, AUDIT_WAIT_SECONDS, INACTIVITY_TIMEOUT
+import db
+import cache
+from notifier import send_admin_embed
+from audit import find_audit_entry_for_channel
+from music import music_manager, search_youtube, play_next, LOOP_OFF, LOOP_CURRENT, LOOP_QUEUE
 
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-LOOP_OFF = 0
-LOOP_CURRENT = 1
-LOOP_QUEUE = 2
+empty_channel_timers = {}
 
-# 1. OPCIONES PARA BÚSQUEDA RAPIDA (LAZY LOADING)
-# 'extract_flat': 'in_playlist' es la magia que hace que las playlists carguen en 1 segundo.
-YDL_SEARCH_OPTIONS = {
-    'format': 'bestaudio/best',
-    'noplaylist': False,
-    'playlistmaxentries': 150,  # Puedes subirlo sin problema porque ahora es rapidísimo
-    'extract_flat': 'in_playlist',
-    'quiet': True,
-    'no_warnings': True,
-    'default_search': 'ytsearch',
-    'source_address': '0.0.0.0',
-    'force_ipv4': True,
-}
-
-# 2. OPCIONES PARA EXTRACCIÓN PROFUNDA (Solo 1 canción a la vez)
-YDL_EXTRACT_OPTIONS = {
-    'format': 'bestaudio/best',
-    'noplaylist': True,
-    'quiet': True,
-    'no_warnings': True,
-    'source_address': '0.0.0.0',
-    'force_ipv4': True,
-}
-
-FFMPEG_OPTIONS = {
-    'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
-    'options': '-vn'
-}
+intents = discord.Intents.default()
+intents.message_content = True
+intents.members = True
+intents.voice_states = True
 
 
-@dataclass
-class Song:
-    title: str
-    webpage_url: str
-    thumbnail: str
-    stream_url: Optional[str] = None  # Ahora es opcional, lo rellenamos justo antes de sonar
-    requester: Optional[discord.Member] = None
-
-    def __str__(self): return self.title
-
-
-class MusicPlayer:
-    def __init__(self, guild: discord.Guild):
-        self.guild = guild
-        self.queue: deque[Song] = deque()
-        self.current: Optional[Song] = None
-        self.loop_mode = LOOP_OFF
-        self.inactivity_task: Optional[asyncio.Task] = None
-
-    def add_song(self, song: Song) -> bool:
-        if len(self.queue) >= MAX_QUEUE_SIZE: return False
-        self.queue.append(song)
-        return True
-
-    def get_next(self) -> Optional[Song]:
-        last_song = self.current
-
-        if self.loop_mode == LOOP_CURRENT and last_song:
-            return last_song
-
-        if self.loop_mode == LOOP_QUEUE and last_song:
-            self.queue.append(last_song)
-
-        if self.queue:
-            return self.queue.popleft()
-
-        return None
-
-    def shuffle_queue(self):
-        if len(self.queue) > 0:
-            temp_list = list(self.queue)
-            random.shuffle(temp_list)
-            self.queue = deque(temp_list)
-
-    def clear_queue(self):
-        self.queue.clear()
-
-
-class MusicManager:
+class MusicBot(commands.Bot):
     def __init__(self):
-        self.players: Dict[int, MusicPlayer] = {}
+        super().__init__(command_prefix="!", intents=intents, help_command=None)
 
-    def get_player(self, guild: discord.Guild) -> MusicPlayer:
-        if guild.id not in self.players: self.players[guild.id] = MusicPlayer(guild)
-        return self.players[guild.id]
-
-    def remove_player(self, guild_id: int):
-        if guild_id in self.players: del self.players[guild_id]
+    async def setup_hook(self):
+        await self.tree.sync()
 
 
-music_manager = MusicManager()
+bot = MusicBot()
 
 
-async def search_youtube(query: str) -> List[Song]:
-    """Carga rápida de canciones (Solo obtiene títulos y links)"""
-    try:
-        loop = asyncio.get_event_loop()
-
-        def extract():
-            with yt_dlp.YoutubeDL(YDL_SEARCH_OPTIONS) as ydl:
-                return ydl.extract_info(query, download=False)
-
-        info = await loop.run_in_executor(None, extract)
-        if not info: return []
-
-        songs = []
-        entries = info.get('entries', [info])
-
-        for entry in entries:
-            if not entry: continue
-
-            # Obtener el link del video real
-            webpage_url = entry.get('webpage_url')
-            if not webpage_url:
-                url_field = entry.get('url', '')
-                if 'youtube.com' in url_field or 'youtu.be' in url_field:
-                    webpage_url = url_field
-                else:
-                    webpage_url = f"https://www.youtube.com/watch?v={entry.get('id')}"
-
-            # Obtener miniatura (en carga plana viene como lista a veces)
-            thumbnail = ''
-            if entry.get('thumbnails'):
-                thumbnail = entry['thumbnails'][0]['url']
-            elif entry.get('thumbnail'):
-                thumbnail = entry.get('thumbnail')
-
-            # Si por casualidad se cargó entera (ej. video individual), guardamos el audio ya
-            stream_url = None
-            if 'formats' in entry:
-                f_audio = [f for f in entry['formats'] if f.get('vcodec') == 'none' and f.get('url')]
-                if f_audio: stream_url = f_audio[0]['url']
-
-            if not webpage_url: continue
-
-            songs.append(Song(
-                title=entry.get('title', 'Desconocido'),
-                webpage_url=webpage_url,
-                thumbnail=thumbnail,
-                stream_url=stream_url
-            ))
-
-        return songs
-    except Exception as e:
-        logger.error(f"Error en búsqueda: {e}")
-        return []
+@bot.event
+async def on_ready():
+    logger.info(f"✅ Bot conectado como {bot.user}")
+    db.init_db()
 
 
-async def play_next(voice_client: discord.VoiceClient, player: MusicPlayer):
-    """Reproduce y extrae el audio pesado Justo A Tiempo"""
-    if not voice_client or not voice_client.is_connected(): return
-    if player.inactivity_task:
-        player.inactivity_task.cancel()
-        player.inactivity_task = None
+@bot.event
+async def on_voice_state_update(member, before, after):
+    guild_id = member.guild.id
+    vc = member.guild.voice_client
 
-    song = player.get_next()
-    if song is None:
-        player.current = None
-        player.inactivity_task = asyncio.create_task(inactivity_disconnect(voice_client, player))
+    if member.id == bot.user.id and after.channel is None:
+        if guild_id in empty_channel_timers:
+            empty_channel_timers[guild_id].cancel()
+            del empty_channel_timers[guild_id]
+        music_manager.remove_player(guild_id)
         return
 
-    player.current = song
+    if vc and vc.channel:
+        human_members = [m for m in vc.channel.members if not m.bot]
 
-    # --- EXTRACCIÓN JUST IN TIME (LA MAGIA DE CARGAR RÁPIDO) ---
-    if not song.stream_url:
-        try:
-            logger.info(f"Extrayendo audio en tiempo real para: {song.title}")
-            loop = asyncio.get_event_loop()
+        if len(human_members) == 0:
+            if guild_id not in empty_channel_timers:
+                empty_channel_timers[guild_id] = asyncio.create_task(disconnect_if_empty(member.guild, vc))
+        else:
+            if guild_id in empty_channel_timers:
+                empty_channel_timers[guild_id].cancel()
+                del empty_channel_timers[guild_id]
 
-            def extract_single():
-                with yt_dlp.YoutubeDL(YDL_EXTRACT_OPTIONS) as ydl:
-                    return ydl.extract_info(song.webpage_url, download=False)
 
-            info = await loop.run_in_executor(None, extract_single)
-            if info and 'formats' in info:
-                f_audio = [f for f in info['formats'] if f.get('vcodec') == 'none' and f.get('url')]
-                if f_audio: song.stream_url = f_audio[0]['url']
-        except Exception as e:
-            logger.error(f"Fallo al cargar la canción {song.title}: {e}")
-            await play_next(voice_client, player)  # Saltamos a la siguiente si esta falla
-            return
-
-    if not song.stream_url:
-        logger.warning(f"No se encontró URL de audio para {song.title}")
-        await play_next(voice_client, player)
-        return
-    # -------------------------------------------------------------
-
+async def disconnect_if_empty(guild, vc):
     try:
-        source = discord.FFmpegPCMAudio(song.stream_url, **FFMPEG_OPTIONS)
-        voice_client.play(source, after=lambda e: asyncio.run_coroutine_threadsafe(play_next(voice_client, player),
-                                                                                   voice_client.client.loop))
-        logger.info(f"▶️ Sonando: {song.title}")
+        await asyncio.sleep(INACTIVITY_TIMEOUT)
+        if vc and vc.is_connected():
+            music_manager.remove_player(guild.id)
+            await vc.disconnect()
+    except asyncio.CancelledError:
+        pass
+    finally:
+        if guild.id in empty_channel_timers:
+            del empty_channel_timers[guild.id]
+
+
+@bot.event
+async def on_message(message: discord.Message):
+    if message.author.bot or not message.guild: return
+    try:
+        content = message.content or ("[Embed]" if message.embeds else "[Sin contenido]")
+        db.save_message(message.id, message.author.id, content, message.channel.id)
+        cache.cache_message(message.id, message.author.id, content)
     except Exception as e:
-        logger.error(f"Error audio: {e}")
-        await play_next(voice_client, player)
+        logger.error(f"Error guardando mensaje: {e}")
 
 
-async def inactivity_disconnect(voice_client: discord.VoiceClient, player: MusicPlayer):
-    await asyncio.sleep(INACTIVITY_TIMEOUT)
-    if voice_client.is_connected() and not voice_client.is_playing():
-        await voice_client.disconnect()
-        music_manager.remove_player(voice_client.guild.id)
+@bot.event
+async def on_raw_message_delete(payload: discord.RawMessageDeleteEvent):
+    if not payload.guild_id: return
+    cached = cache.get_cached(payload.message_id)
+    content = cached[1] if cached else None
+    author_id = cached[0] if cached else None
+    if not content:
+        rec = db.get_message(payload.message_id)
+        if rec: content, author_id = rec['content'], rec['author_id']
+    if not content: return
+
+    await asyncio.sleep(AUDIT_WAIT_SECONDS)
+    try:
+        guild = bot.get_guild(payload.guild_id)
+        admin_channel = guild.get_channel(ADMIN_LOG_CHANNEL_ID)
+        if not admin_channel: return
+        entry = await find_audit_entry_for_channel(guild, payload.channel_id)
+        executor = entry.user if entry else None
+        if author_id and executor and executor.id == author_id: return
+
+        await send_admin_embed(
+            admin_channel,
+            author_display=f"<@{author_id}>" if author_id else "Desconocido",
+            executor_display=executor.mention if executor else "Desconocido",
+            channel_display=guild.get_channel(payload.channel_id).mention,
+            content=content,
+            message_id=payload.message_id
+        )
+    except Exception as e:
+        logger.error(f"Error enviando log: {e}")
+
+
+def check_music_channel(interaction: discord.Interaction) -> bool:
+    return not MUSIC_CHANNEL_ID or interaction.channel_id == MUSIC_CHANNEL_ID
+
+
+@bot.tree.command(name="play", description="Reproduce música o playlists de YouTube")
+async def play(interaction: discord.Interaction, busqueda: str):
+    if not check_music_channel(interaction):
+        return await interaction.response.send_message(f"❌ Solo en <#{MUSIC_CHANNEL_ID}>", ephemeral=True)
+    if not interaction.user.voice:
+        return await interaction.response.send_message("❌ Entra a un canal de voz primero.", ephemeral=True)
+
+    await interaction.response.defer()
+
+    songs = await search_youtube(busqueda)
+    if not songs:
+        return await interaction.followup.send("❌ No encontré resultados.")
+
+    guild = interaction.guild
+    voice_channel = interaction.user.voice.channel
+    player = music_manager.get_player(guild)
+
+    vc = guild.voice_client
+    try:
+        if not vc:
+            vc = await voice_channel.connect(self_deaf=True)
+        elif vc.channel != voice_channel:
+            await vc.move_to(voice_channel)
+    except Exception as e:
+        return await interaction.followup.send(f"❌ Error conexión: {e}")
+
+    for s in songs:
+        s.requester = interaction.user
+        player.add_song(s)
+
+    is_playing_now = False
+    if not vc.is_playing() and not player.current:
+        await play_next(vc, player)
+        is_playing_now = True
+
+    if len(songs) > 1:
+        embed = discord.Embed(title="📂 Playlist Añadida",
+                              description=f"Se han añadido **{len(songs)}** canciones a la cola.",
+                              color=discord.Color.purple())
+    else:
+        s = songs[0]
+        embed = discord.Embed(
+            title="🎶 Reproduciendo" if is_playing_now else "📝 En cola",
+            description=f"**[{s.title}]({s.webpage_url})**",
+            color=discord.Color.green() if is_playing_now else discord.Color.blue()
+        )
+        if s.thumbnail: embed.set_thumbnail(url=s.thumbnail)
+
+    embed.set_footer(text=f"Pedido por {interaction.user.display_name}", icon_url=interaction.user.display_avatar.url)
+    await interaction.followup.send(embed=embed)
+
+
+@bot.tree.command(name="loop", description="Configura el modo de repetición")
+@app_commands.choices(modo=[
+    app_commands.Choice(name

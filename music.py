@@ -2,6 +2,7 @@ import discord
 import asyncio
 import yt_dlp
 import logging
+import random
 from typing import Optional, Dict, List
 from dataclasses import dataclass
 from collections import deque
@@ -9,14 +10,27 @@ from config import MAX_QUEUE_SIZE, INACTIVITY_TIMEOUT
 
 logger = logging.getLogger(__name__)
 
-# Configuración optimizada para Raspberry Pi y Playlists
-YDL_OPTIONS = {
+LOOP_OFF = 0
+LOOP_CURRENT = 1
+LOOP_QUEUE = 2
+
+YDL_SEARCH_OPTIONS = {
     'format': 'bestaudio/best',
-    'noplaylist': False,  # AHORA PERMITIMOS PLAYLISTS
-    'playlistmaxentries': 50,  # Límite para no saturar la RPi
+    'noplaylist': False,
+    'playlistmaxentries': 150,
+    'extract_flat': 'in_playlist',
     'quiet': True,
     'no_warnings': True,
     'default_search': 'ytsearch',
+    'source_address': '0.0.0.0',
+    'force_ipv4': True,
+}
+
+YDL_EXTRACT_OPTIONS = {
+    'format': 'bestaudio/best',
+    'noplaylist': True,
+    'quiet': True,
+    'no_warnings': True,
     'source_address': '0.0.0.0',
     'force_ipv4': True,
 }
@@ -29,10 +43,10 @@ FFMPEG_OPTIONS = {
 
 @dataclass
 class Song:
-    url: str  # URL del flujo (audio real)
-    title: str  # Título
-    webpage_url: str  # Link de YouTube (para el embed)
-    thumbnail: str  # Miniatura
+    title: str
+    webpage_url: str
+    thumbnail: str
+    stream_url: Optional[str] = None
     requester: Optional[discord.Member] = None
 
     def __str__(self): return self.title
@@ -43,6 +57,7 @@ class MusicPlayer:
         self.guild = guild
         self.queue: deque[Song] = deque()
         self.current: Optional[Song] = None
+        self.loop_mode = LOOP_OFF
         self.inactivity_task: Optional[asyncio.Task] = None
 
     def add_song(self, song: Song) -> bool:
@@ -51,8 +66,24 @@ class MusicPlayer:
         return True
 
     def get_next(self) -> Optional[Song]:
-        if self.queue: return self.queue.popleft()
+        last_song = self.current
+
+        if self.loop_mode == LOOP_CURRENT and last_song:
+            return last_song
+
+        if self.loop_mode == LOOP_QUEUE and last_song:
+            self.queue.append(last_song)
+
+        if self.queue:
+            return self.queue.popleft()
+
         return None
+
+    def shuffle_queue(self):
+        if len(self.queue) > 0:
+            temp_list = list(self.queue)
+            random.shuffle(temp_list)
+            self.queue = deque(temp_list)
 
     def clear_queue(self):
         self.queue.clear()
@@ -74,38 +105,48 @@ music_manager = MusicManager()
 
 
 async def search_youtube(query: str) -> List[Song]:
-    """Busca y devuelve una lista de objetos Song."""
     try:
         loop = asyncio.get_event_loop()
 
         def extract():
-            with yt_dlp.YoutubeDL(YDL_OPTIONS) as ydl:
+            with yt_dlp.YoutubeDL(YDL_SEARCH_OPTIONS) as ydl:
                 return ydl.extract_info(query, download=False)
 
         info = await loop.run_in_executor(None, extract)
         if not info: return []
 
         songs = []
-        # Si es una playlist o búsqueda, 'entries' contiene los videos
         entries = info.get('entries', [info])
 
         for entry in entries:
             if not entry: continue
 
-            # Obtener el stream de audio real
-            stream_url = entry.get('url')
-            if not stream_url and 'formats' in entry:
-                # Buscar mejor formato de solo audio
+            webpage_url = entry.get('webpage_url')
+            if not webpage_url:
+                url_field = entry.get('url', '')
+                if 'youtube.com' in url_field or 'youtu.be' in url_field:
+                    webpage_url = url_field
+                else:
+                    webpage_url = f"https://www.youtube.com/watch?v={entry.get('id')}"
+
+            thumbnail = ''
+            if entry.get('thumbnails'):
+                thumbnail = entry['thumbnails'][0]['url']
+            elif entry.get('thumbnail'):
+                thumbnail = entry.get('thumbnail')
+
+            stream_url = None
+            if 'formats' in entry:
                 f_audio = [f for f in entry['formats'] if f.get('vcodec') == 'none' and f.get('url')]
                 if f_audio: stream_url = f_audio[0]['url']
 
-            if not stream_url: continue
+            if not webpage_url: continue
 
             songs.append(Song(
-                url=stream_url,
                 title=entry.get('title', 'Desconocido'),
-                webpage_url=entry.get('webpage_url') or f"https://www.youtube.com/watch?v={entry.get('id')}",
-                thumbnail=entry.get('thumbnail', '')
+                webpage_url=webpage_url,
+                thumbnail=thumbnail,
+                stream_url=stream_url
             ))
 
         return songs
@@ -127,10 +168,34 @@ async def play_next(voice_client: discord.VoiceClient, player: MusicPlayer):
         return
 
     player.current = song
+
+    if not song.stream_url:
+        try:
+            loop = asyncio.get_event_loop()
+
+            def extract_single():
+                with yt_dlp.YoutubeDL(YDL_EXTRACT_OPTIONS) as ydl:
+                    return ydl.extract_info(song.webpage_url, download=False)
+
+            info = await loop.run_in_executor(None, extract_single)
+            if info and 'formats' in info:
+                f_audio = [f for f in info['formats'] if f.get('vcodec') == 'none' and f.get('url')]
+                if f_audio: song.stream_url = f_audio[0]['url']
+        except Exception as e:
+            logger.error(f"Fallo al cargar la canción {song.title}: {e}")
+            await play_next(voice_client, player)
+            return
+
+    if not song.stream_url:
+        logger.warning(f"No se encontró URL de audio para {song.title}")
+        await play_next(voice_client, player)
+        return
+
     try:
-        source = discord.FFmpegPCMAudio(song.url, **FFMPEG_OPTIONS)
+        source = discord.FFmpegPCMAudio(song.stream_url, **FFMPEG_OPTIONS)
         voice_client.play(source, after=lambda e: asyncio.run_coroutine_threadsafe(play_next(voice_client, player),
                                                                                    voice_client.client.loop))
+        logger.info(f"▶️ Sonando: {song.title}")
     except Exception as e:
         logger.error(f"Error audio: {e}")
         await play_next(voice_client, player)
