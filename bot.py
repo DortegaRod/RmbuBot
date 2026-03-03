@@ -21,14 +21,15 @@ from music import (
 
 # --- CONFIGURACIÓN DE RADIOS ---
 # Diccionario con nombres y URLs directas de streaming de las emisoras
+# --- LISTA DE RADIOS ESPAÑOLAS (URLs Oficiales Actualizadas) ---
 RADIOS_ES = {
     "los40": ("Los 40 Principales", "https://21633.live.streamtheworld.com/LOS40_SC"),
-    "cadena100": ("Cadena 100", "https://cadena100-cope-rrcast.flumotion.com/cope/cadena100-low.mp3"),
+    "cadena100": ("Cadena 100", "https://cadena100-cope-flucast.flumotion.com/cope/cadena100.mp3"),
     "europafm": ("Europa FM", "https://icecast-streaming.nice264.com/europafm"),
-    "rockfm": ("Rock FM", "https://rockfm-cope-rrcast.flumotion.com/cope/rockfm-low.mp3"),
+    "rockfm": ("Rock FM", "https://rockfm-cope-flucast.flumotion.com/cope/rockfm.mp3"),
     "kissfm": ("Kiss FM", "http://kissfm.kissfmradio.cires21.com/kissfm.mp3"),
     "cadenaser": ("Cadena SER", "https://20853.live.streamtheworld.com/CADENASER.mp3"),
-    "cope": ("COPE", "https://net2.flumotion.com/cope/cope-ne.mp3"),
+    "cope": ("COPE", "https://net1-cope-flucast.flumotion.com/cope/net1.mp3"),
     "ondacero": ("Onda Cero", "https://icecast-streaming.nice264.com/ondacero"),
     "hitfm": ("Hit FM", "http://hitfm.kissfmradio.cires21.com/hitfm.mp3"),
     "radiola": ("Radiolé", "https://20863.live.streamtheworld.com/RADIOLE.mp3"),
