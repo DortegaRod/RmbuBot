@@ -23,19 +23,19 @@ from music import (
 # Diccionario con nombres y URLs directas de streaming de las emisoras
 # --- LISTA DE RADIOS ESPAÑOLAS (URLs Oficiales Actualizadas) ---
 RADIOS_ES = {
-    "los40": ("Los 40 Principales", "https://21633.live.streamtheworld.com/LOS40_SC"),
-    "cadena100": ("Cadena 100", "https://cadena100-cope-flucast.flumotion.com/cope/cadena100.mp3"),
-    "europafm": ("Europa FM", "https://icecast-streaming.nice264.com/europafm"),
-    "rockfm": ("Rock FM", "https://rockfm-cope-flucast.flumotion.com/cope/rockfm.mp3"),
-    "kissfm": ("Kiss FM", "http://kissfm.kissfmradio.cires21.com/kissfm.mp3"),
-    "cadenaser": ("Cadena SER", "https://20853.live.streamtheworld.com/CADENASER.mp3"),
-    "cope": ("COPE", "https://net1-cope-flucast.flumotion.com/cope/net1.mp3"),
-    "ondacero": ("Onda Cero", "https://icecast-streaming.nice264.com/ondacero"),
-    "hitfm": ("Hit FM", "http://hitfm.kissfmradio.cires21.com/hitfm.mp3"),
-    "radiola": ("Radiolé", "https://20863.live.streamtheworld.com/RADIOLE.mp3"),
-    "los40urban": ("Los 40 Urban", "https://22533.live.streamtheworld.com/LOS40_URBAN_SC"),
-    "locafm": ("Loca FM", "http://audio-online.net:23500/live"),
-    "ibizaglobal": ("Ibiza Global Radio", "https://list.ibizaglobalradio.com:8024/ibizaglobalradio.mp3")
+    "los40":       ("Los 40 Principales", "https://playerservices.streamtheworld.com/api/livestream-redirect/Los40.mp3"),
+    "cadena100":   ("Cadena 100",         "https://flucast09-h-cloud.flumotion.com/cope/cadena100.mp3"),
+    "europafm":    ("Europa FM",          "https://icecast-streaming.nice264.com/europafm"),
+    "rockfm":      ("Rock FM",            "https://flucast09-h-cloud.flumotion.com/cope/rockfm.mp3"),
+    "kissfm":      ("Kiss FM",            "http://kissfm.kissfmradio.cires21.com/kissfm.mp3"),
+    "cadenaser":   ("Cadena SER",         "https://playerservices.streamtheworld.com/api/livestream-redirect/CADENASER.mp3"),
+    "cope":        ("COPE",               "https://flucast09-h-cloud.flumotion.com/cope/net1.mp3"),
+    "ondacero":    ("Onda Cero",          "https://icecast-streaming.nice264.com/ondacero"),
+    "hitfm":       ("Hit FM",             "http://hitfm.kissfmradio.cires21.com/hitfm.mp3"),
+    "radiola":     ("Radiolé",            "https://playerservices.streamtheworld.com/api/livestream-redirect/RADIOLE.mp3"),
+    "los40urban":  ("Los 40 Urban",       "https://playerservices.streamtheworld.com/api/livestream-redirect/LOS40_URBAN.mp3"),
+    "locafm":      ("Loca FM",            "http://audio-online.net:2300/live"),
+    "ibizaglobal": ("Ibiza Global Radio", "http://ibizaglobalradio.streaming-pro.com:8024"),
 }
 
 # --- INICIALIZACIÓN ---
