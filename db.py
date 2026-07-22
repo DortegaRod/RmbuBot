@@ -21,12 +21,22 @@ CREATE_INDEX_SQL = """
 CREATE INDEX IF NOT EXISTS idx_message_id ON mensajes(message_id);
 """
 
+# Configuración persistente por servidor (canal de comandos de /setup)
+CREATE_GUILD_CONFIG_SQL = """
+CREATE TABLE IF NOT EXISTS guild_config (
+    guild_id INTEGER PRIMARY KEY,
+    music_channel_id INTEGER
+);
+"""
+
 
 @contextmanager
 def get_db_connection():
     """Context manager para conexiones a la base de datos."""
     conn = sqlite3.connect(str(DB_PATH))
     conn.row_factory = sqlite3.Row
+    # Espera hasta 5s si la BD está bloqueada por otra escritura (evita 'database is locked')
+    conn.execute("PRAGMA busy_timeout=5000")
     try:
         yield conn
         conn.commit()
@@ -43,8 +53,13 @@ def init_db():
     try:
         with get_db_connection() as conn:
             cursor = conn.cursor()
+            # WAL: permite lecturas concurrentes con la escritura y mejora el
+            # rendimiento al guardar muchos mensajes. Es una propiedad del fichero,
+            # basta con activarla una vez.
+            cursor.execute("PRAGMA journal_mode=WAL")
             cursor.execute(CREATE_TABLE_SQL)
             cursor.execute(CREATE_INDEX_SQL)
+            cursor.execute(CREATE_GUILD_CONFIG_SQL)
         logger.info("Base de datos inicializada correctamente")
     except Exception as e:
         logger.error(f"Error al inicializar la base de datos: {e}")
@@ -125,3 +140,60 @@ def delete_old_messages(days: int = 30) -> int:
     except Exception as e:
         logger.error(f"Error al eliminar mensajes antiguos: {e}")
         return 0
+
+
+# ==========================================
+# CONFIGURACIÓN POR SERVIDOR (comando /setup)
+# ==========================================
+
+def set_music_channel(guild_id: int, channel_id: int) -> bool:
+    """
+    Fija (o actualiza) el canal de comandos de un servidor.
+
+    Returns:
+        bool: True si se guardó correctamente.
+    """
+    try:
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "INSERT OR REPLACE INTO guild_config (guild_id, music_channel_id) VALUES (?, ?)",
+                (guild_id, channel_id)
+            )
+        return True
+    except Exception as e:
+        logger.error(f"Error al guardar canal del servidor {guild_id}: {e}")
+        return False
+
+
+def get_music_channel(guild_id: int) -> Optional[int]:
+    """
+    Recupera el canal de comandos configurado para un servidor.
+
+    Returns:
+        int | None: ID del canal, o None si el servidor no ha hecho /setup.
+    """
+    try:
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT music_channel_id FROM guild_config WHERE guild_id = ?",
+                (guild_id,)
+            )
+            row = cursor.fetchone()
+            return row[0] if row else None
+    except Exception as e:
+        logger.error(f"Error al recuperar canal del servidor {guild_id}: {e}")
+        return None
+
+
+def clear_music_channel(guild_id: int) -> bool:
+    """Elimina la restricción de canal de un servidor (vuelve a permitir todos)."""
+    try:
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM guild_config WHERE guild_id = ?", (guild_id,))
+        return True
+    except Exception as e:
+        logger.error(f"Error al borrar config del servidor {guild_id}: {e}")
+        return False

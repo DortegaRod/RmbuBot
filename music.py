@@ -12,7 +12,7 @@ import random
 from typing import Optional, Dict, List
 from dataclasses import dataclass
 from collections import deque
-from config import MAX_QUEUE_SIZE, INACTIVITY_TIMEOUT
+from config import MAX_QUEUE_SIZE, INACTIVITY_TIMEOUT, DEFAULT_VOLUME
 
 logger = logging.getLogger(__name__)
 
@@ -66,6 +66,7 @@ class Song:
     thumbnail: str
     stream_url: Optional[str] = None  # URL directa del archivo de audio (.mp3, .webm)
     requester: Optional[discord.Member] = None
+    is_radio: bool = False  # True para emisoras en directo (stream permanente, sin yt-dlp)
 
     def __str__(self):
         return self.title
@@ -81,7 +82,9 @@ class MusicPlayer:
         self.queue: deque[Song] = deque()
         self.current: Optional[Song] = None
         self.loop_mode = LOOP_OFF
-        self.inactivity_task: Optional[asyncio.Task] = None
+        self.volume = DEFAULT_VOLUME  # 0.0 - 1.0, ajustable con /volume
+        self.inactivity_task: Optional[asyncio.Task] = None  # Silencio (cola vacía)
+        self.empty_task: Optional[asyncio.Task] = None       # Canal de voz sin humanos
 
     def add_song(self, song: Song) -> bool:
         """Añade una canción a la cola si no se ha superado el límite configurado."""
@@ -102,7 +105,10 @@ class MusicPlayer:
             return last_song
 
         if self.loop_mode == LOOP_QUEUE and last_song:
-            last_song.stream_url = None # Invalidamos el token temporal de audio
+            # Las radios conservan su stream permanente; solo invalidamos el token
+            # temporal de audio de YouTube (que caduca y hay que re-extraer con yt-dlp).
+            if not last_song.is_radio:
+                last_song.stream_url = None
             self.queue.append(last_song)
 
         # Extraer la siguiente pista
@@ -121,6 +127,20 @@ class MusicPlayer:
     def clear_queue(self):
         """Vacía la cola de reproducción por completo."""
         self.queue.clear()
+
+    def remove_at(self, index: int) -> Optional[Song]:
+        """
+        Elimina y devuelve la canción en la posición `index` (base 0) de la cola.
+
+        Returns:
+            Song | None: La canción eliminada, o None si el índice es inválido.
+        """
+        if 0 <= index < len(self.queue):
+            temp = list(self.queue)
+            song = temp.pop(index)
+            self.queue = deque(temp)
+            return song
+        return None
 
 
 class MusicManager:
@@ -249,7 +269,9 @@ async def play_next(voice_client: discord.VoiceClient, player: MusicPlayer):
 
     # Inyección en FFmpeg
     try:
-        source = discord.FFmpegPCMAudio(song.stream_url, **FFMPEG_OPTIONS)
+        raw_source = discord.FFmpegPCMAudio(song.stream_url, **FFMPEG_OPTIONS)
+        # Envolvemos en PCMVolumeTransformer para permitir ajuste de volumen en vivo (/volume)
+        source = discord.PCMVolumeTransformer(raw_source, volume=player.volume)
         # El callback 'after' crea un bucle infinito que llama a esta misma función al terminar
         voice_client.play(source, after=lambda e: asyncio.run_coroutine_threadsafe(play_next(voice_client, player), voice_client.client.loop))
         logger.info(f"▶️ Sonando correctamente: {song.title}")
@@ -264,3 +286,23 @@ async def inactivity_disconnect(voice_client: discord.VoiceClient, player: Music
     if voice_client.is_connected() and not voice_client.is_playing():
         await voice_client.disconnect()
         music_manager.remove_player(voice_client.guild.id)
+
+
+async def empty_channel_disconnect(voice_client: discord.VoiceClient, player: MusicPlayer,
+                                   timeout: int = 60):
+    """
+    Desconecta al bot si su canal de voz se queda sin humanos durante `timeout` segundos.
+    Se cancela automáticamente si alguien vuelve a entrar antes de que expire.
+    """
+    try:
+        await asyncio.sleep(timeout)
+        if voice_client.is_connected():
+            humans = [m for m in voice_client.channel.members if not m.bot]
+            if not humans:
+                logger.info("👋 Canal de voz vacío, desconectando para ahorrar recursos.")
+                await voice_client.disconnect()
+                music_manager.remove_player(voice_client.guild.id)
+    except asyncio.CancelledError:
+        pass  # Alguien volvió a entrar; cancelación normal
+    finally:
+        player.empty_task = None
