@@ -186,6 +186,23 @@ async def on_raw_message_delete(payload: discord.RawMessageDeleteEvent):
 # UTILIDADES DE COMANDOS
 # ==========================================
 
+def _fmt_time(seconds: float) -> str:
+    """Formatea segundos como M:SS o H:MM:SS."""
+    seconds = int(max(0, seconds))
+    h, rem = divmod(seconds, 3600)
+    m, s = divmod(rem, 60)
+    return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
+
+
+def _progress_bar(elapsed: float, total: float, length: int = 18) -> str:
+    """Devuelve una barra tipo ─────🔘──────── según el progreso."""
+    if not total or total <= 0:
+        return ""
+    frac = max(0.0, min(1.0, elapsed / total))
+    pos = int(frac * (length - 1))
+    return "─" * pos + "🔘" + "─" * (length - 1 - pos)
+
+
 async def deny_wrong_channel(interaction: discord.Interaction) -> bool:
     """
     Comprueba si la interacción ocurre en el canal de comandos configurado con /setup.
@@ -352,10 +369,11 @@ async def radio(interaction: discord.Interaction, emisora: app_commands.Choice[s
     await interaction.followup.send(embed=embed)
 
 
-@bot.tree.command(name="current", description="Muestra la canción que está sonando ahora mismo")
+@bot.tree.command(name="current", description="Muestra la canción que suena ahora con barra de progreso")
 async def current(interaction: discord.Interaction):
-    """Muestra información de la pista/emisora en reproducción."""
+    """Muestra la pista/emisora en reproducción con su progreso (o 'EN DIRECTO' en radios)."""
     player = music_manager.get_player(interaction.guild)
+    vc = interaction.guild.voice_client
     if not player.current:
         return await interaction.response.send_message("🔇 No hay nada sonando ahora mismo.", ephemeral=True)
 
@@ -367,6 +385,20 @@ async def current(interaction: discord.Interaction):
     )
     if s.thumbnail:
         embed.set_thumbnail(url=s.thumbnail)
+
+    # Línea de progreso: barra + tiempos para canciones; "EN DIRECTO" para radios
+    paused = bool(vc and vc.is_paused())
+    if s.is_radio or not s.duration:
+        embed.add_field(name="​", value="🔴 **EN DIRECTO**", inline=False)
+    else:
+        elapsed = min(player.get_elapsed(), s.duration)
+        bar = _progress_bar(elapsed, s.duration)
+        icon = "⏸️" if paused else "▶️"
+        embed.add_field(
+            name="​",
+            value=f"{icon} `{_fmt_time(elapsed)}` {bar} `{_fmt_time(s.duration)}`",
+            inline=False
+        )
 
     modes = {LOOP_OFF: "Off", LOOP_CURRENT: "🔂 Canción", LOOP_QUEUE: "🔁 Cola"}
     footer = f"Volumen: {int(player.volume * 100)}% | Bucle: {modes[player.loop_mode]} | En cola: {len(player.queue)}"
@@ -426,6 +458,7 @@ async def pause(interaction: discord.Interaction):
     vc = interaction.guild.voice_client
     if vc and vc.is_playing():
         vc.pause()
+        music_manager.get_player(interaction.guild).mark_paused()
         await interaction.response.send_message("⏸️ Reproducción **pausada**. Usa `/resume` para continuar.")
     else:
         await interaction.response.send_message("❌ No hay nada sonando.", ephemeral=True)
@@ -438,6 +471,7 @@ async def resume(interaction: discord.Interaction):
     vc = interaction.guild.voice_client
     if vc and vc.is_paused():
         vc.resume()
+        music_manager.get_player(interaction.guild).mark_resumed()
         await interaction.response.send_message("▶️ Reproducción **reanudada**.")
     else:
         await interaction.response.send_message("❌ No hay nada pausado.", ephemeral=True)

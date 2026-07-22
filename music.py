@@ -9,6 +9,7 @@ import asyncio
 import yt_dlp
 import logging
 import random
+import time
 from typing import Optional, Dict, List
 from dataclasses import dataclass
 from collections import deque
@@ -67,6 +68,7 @@ class Song:
     stream_url: Optional[str] = None  # URL directa del archivo de audio (.mp3, .webm)
     requester: Optional[discord.Member] = None
     is_radio: bool = False  # True para emisoras en directo (stream permanente, sin yt-dlp)
+    duration: Optional[int] = None  # Duración en segundos (None en radios/directos)
 
     def __str__(self):
         return self.title
@@ -85,6 +87,9 @@ class MusicPlayer:
         self.volume = DEFAULT_VOLUME  # 0.0 - 1.0, ajustable con /volume
         self.inactivity_task: Optional[asyncio.Task] = None  # Silencio (cola vacía)
         self.empty_task: Optional[asyncio.Task] = None       # Canal de voz sin humanos
+        # Seguimiento del tiempo de reproducción (para la barra de progreso de /current)
+        self.started_monotonic: Optional[float] = None  # Instante del segmento en curso
+        self.paused_elapsed: float = 0.0                 # Segundos ya acumulados antes de pausas
 
     def add_song(self, song: Song) -> bool:
         """Añade una canción a la cola si no se ha superado el límite configurado."""
@@ -127,6 +132,29 @@ class MusicPlayer:
     def clear_queue(self):
         """Vacía la cola de reproducción por completo."""
         self.queue.clear()
+
+    def mark_started(self):
+        """Reinicia el cronómetro al empezar una canción nueva."""
+        self.paused_elapsed = 0.0
+        self.started_monotonic = time.monotonic()
+
+    def mark_paused(self):
+        """Congela el cronómetro al pausar."""
+        if self.started_monotonic is not None:
+            self.paused_elapsed += time.monotonic() - self.started_monotonic
+            self.started_monotonic = None
+
+    def mark_resumed(self):
+        """Reanuda el cronómetro tras una pausa."""
+        if self.started_monotonic is None:
+            self.started_monotonic = time.monotonic()
+
+    def get_elapsed(self) -> float:
+        """Segundos reproducidos de la canción actual (descontando el tiempo en pausa)."""
+        elapsed = self.paused_elapsed
+        if self.started_monotonic is not None:
+            elapsed += time.monotonic() - self.started_monotonic
+        return elapsed
 
     def remove_at(self, index: int) -> Optional[Song]:
         """
@@ -207,7 +235,8 @@ async def search_youtube(query: str) -> List[Song]:
                 title=entry.get('title', 'Desconocido'),
                 webpage_url=webpage_url,
                 thumbnail=thumbnail,
-                stream_url=None  # La carga pesada se delega al momento de reproducción
+                stream_url=None,  # La carga pesada se delega al momento de reproducción
+                duration=entry.get('duration')
             ))
 
         return songs
@@ -251,6 +280,8 @@ async def play_next(voice_client: discord.VoiceClient, player: MusicPlayer):
 
             if info:
                 song.stream_url = info.get('url')
+                if not song.duration:
+                    song.duration = info.get('duration')
                 # Búsqueda fallback del formato de mayor calidad de solo audio
                 if not song.stream_url and 'formats' in info:
                     f_audio = [f for f in info['formats'] if f.get('vcodec') == 'none' and f.get('url')]
@@ -274,6 +305,7 @@ async def play_next(voice_client: discord.VoiceClient, player: MusicPlayer):
         source = discord.PCMVolumeTransformer(raw_source, volume=player.volume)
         # El callback 'after' crea un bucle infinito que llama a esta misma función al terminar
         voice_client.play(source, after=lambda e: asyncio.run_coroutine_threadsafe(play_next(voice_client, player), voice_client.client.loop))
+        player.mark_started()  # Arranca el cronómetro para la barra de progreso
         logger.info(f"▶️ Sonando correctamente: {song.title}")
     except Exception as e:
         logger.error(f"Error audio FFmpeg: {e}")
