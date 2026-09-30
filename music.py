@@ -6,9 +6,11 @@ y el control de reproducción utilizando FFmpeg y discord.py.
 
 import asyncio
 import logging
+import platform
 import random
 import shlex
 import shutil
+import struct
 import time
 from collections import deque
 from dataclasses import dataclass
@@ -40,8 +42,8 @@ FAST_FAIL_SECONDS = 2.0        # Si una pista "termina" antes de esto, FFmpeg no
 def _find_deno() -> Optional[str]:
     """
     yt-dlp necesita un motor JavaScript (Deno) para resolver los retos de YouTube.
-    Primero se busca el paquete oficial de pip (`pip install deno`), que en hostings
-    como SparkedHost queda fuera del PATH; si no está, se usa el `deno` del sistema.
+    Primero se busca el paquete oficial de pip (`pip install deno`), que queda fuera del PATH
+    si el bot se arranca sin activar el entorno virtual; si no está, se usa el `deno` del sistema.
     """
     try:
         import deno
@@ -624,6 +626,8 @@ async def empty_channel_disconnect(voice_client: discord.VoiceClient, player: Mu
 
 def log_dependency_status():
     """Avisa al arrancar de las dependencias que hoy exigen Discord (voz) y YouTube."""
+    bits = struct.calcsize("P") * 8
+    logger.info(f"🖥️ {platform.system()} {platform.machine()} ({bits} bits) · Python {platform.python_version()}")
     logger.info(f"🎵 discord.py {discord.__version__} | yt-dlp {yt_dlp.version.__version__}")
     if discord.version_info < (2, 7):
         logger.error("❌ discord.py es anterior a 2.7: desde marzo de 2026 Discord exige cifrado E2EE (DAVE) "
@@ -638,7 +642,10 @@ def log_dependency_status():
         logger.warning("⚠️ Falta yt-dlp-ejs para YouTube: pip install -U \"yt-dlp[default]\"")
     if DENO_PATH:
         logger.info(f"🦕 Deno para YouTube: {DENO_PATH}")
+    elif bits == 32:
+        logger.info("ℹ️ Sistema de 32 bits: Deno no existe para él. YouTube funciona sin él por ahora; "
+                    "si algún día empieza a fallar, la solución es pasar a un sistema de 64 bits.")
     else:
-        logger.warning("⚠️ Deno no encontrado: YouTube puede fallar o dar peor calidad. Instálalo: pip install deno")
+        logger.warning("⚠️ Deno no encontrado: YouTube puede fallar o dar peor calidad. Instálalo: pip install -U deno")
     if shutil.which("ffmpeg") is None:
-        logger.error("❌ FFmpeg no encontrado: la música no funcionará.")
+        logger.error("❌ FFmpeg no encontrado: la música no funcionará (Raspberry Pi OS: sudo apt install ffmpeg)")

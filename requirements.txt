@@ -1,10 +1,14 @@
-# Voz: desde marzo de 2026 Discord exige cifrado E2EE (DAVE). discord.py 2.7+ con [voice] instala 'davey' y PyNaCl.
+# Voz: desde marzo de 2026 Discord exige cifrado E2EE (DAVE). discord.py 2.7+ con [voice] instala 'davey' y PyNaCl
+# (existen para Raspberry Pi de 32 y de 64 bits).
 discord.py[voice]>=2.7.1
-# YouTube: [default] incluye yt-dlp-ejs, que junto con Deno resuelve los retos JavaScript de YouTube.
+# YouTube: [default] incluye yt-dlp-ejs, que junto con un motor JavaScript (Deno) resuelve los retos de YouTube.
 # Actualízalo a menudo: YouTube cambia constantemente.
 yt-dlp[default]>=2026.8.19
-deno>=2.9
 aiohttp>=3.9
 python-dotenv>=1.0.1
-# Zona horaria de España (la palabra del día cambia a medianoche) aunque el servidor no traiga la suya
+# Zona horaria de España (la palabra del día cambia a medianoche) aunque el sistema no traiga la suya
 tzdata>=2024.1
+
+# Deno NO está en esta lista porque no existe para sistemas de 32 bits (p. ej. Raspberry Pi OS de 32 bits):
+# su instalación fallaría y con ella todo el pip install. En sistemas de 64 bits instálalo aparte (recomendado):
+#   pip install -U deno
