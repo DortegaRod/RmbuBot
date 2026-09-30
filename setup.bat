@@ -1,4 +1,5 @@
 @echo off
+chcp 65001 >nul
 REM Script de inicio rápido para el bot de Discord (Windows)
 REM Este script te ayudará a configurar el bot rápidamente
 
@@ -7,11 +8,11 @@ echo   Bot de Discord - Inicio Rápido
 echo ======================================
 echo.
 
-REM Verificar Python
+REM Verificar Python (se necesita 3.10 o superior)
 echo [*] Verificando Python...
 python --version >nul 2>&1
 if errorlevel 1 (
-    echo [X] Python no está instalado. Por favor, instálalo primero.
+    echo [X] Python no está instalado. Por favor, instala Python 3.10 o superior.
     pause
     exit /b 1
 )
@@ -26,7 +27,7 @@ if errorlevel 1 (
     echo [!] FFmpeg no está instalado.
     echo     Instrucciones de instalación:
     echo     - Descarga desde: https://ffmpeg.org/download.html
-    echo     - O usa Chocolatey: choco install ffmpeg
+    echo     - O usa winget: winget install ffmpeg
     echo.
     set /p response="Deseas continuar sin FFmpeg? (las funciones de musica no funcionaran) [y/N]: "
     if /i not "%response%"=="y" exit /b 1
@@ -37,8 +38,8 @@ echo.
 
 REM Crear entorno virtual
 echo [*] Configurando entorno virtual...
-if not exist "venv" (
-    python -m venv venv
+if not exist ".venv" (
+    python -m venv .venv
     echo [OK] Entorno virtual creado
 ) else (
     echo [OK] Entorno virtual ya existe
@@ -47,13 +48,13 @@ echo.
 
 REM Activar entorno virtual
 echo [*] Activando entorno virtual...
-call venv\Scripts\activate.bat
+call .venv\Scripts\activate.bat
 echo [OK] Entorno virtual activado
 echo.
 
-REM Instalar dependencias
+REM Instalar (y actualizar) dependencias: YouTube y Discord cambian a menudo
 echo [*] Instalando dependencias...
-pip install -r requirements.txt
+python -m pip install -U -r requirements.txt
 echo [OK] Dependencias instaladas
 echo.
 
@@ -85,12 +86,10 @@ echo 1. Asegurate de haber configurado tu .env con:
 echo    - TOKEN del bot
 echo    - ADMIN_LOG_CHANNEL_ID
 echo.
-echo 2. Activa el entorno virtual (si no esta activo):
-echo    venv\Scripts\activate.bat
+echo 2. Comprueba que todo esta bien:
+echo    python diagnose.py
 echo.
 echo 3. Ejecuta el bot:
 echo    python bot.py
-echo.
-echo Para mas informacion, consulta README.md
 echo.
 pause

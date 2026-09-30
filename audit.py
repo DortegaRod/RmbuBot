@@ -1,112 +1,114 @@
-import discord
-from typing import Optional
-from datetime import datetime, timezone
-from config import AUDIT_LOOKBACK_SECONDS
+"""
+Atribución de borrados mediante el Registro de Auditoría de Discord.
+
+Cómo registra Discord los borrados (y por qué el código es así):
+- Si alguien borra SU PROPIO mensaje, Discord NO crea ninguna entrada.
+- Si un moderador borra varios mensajes de la misma persona en el mismo canal en poco
+  tiempo, Discord no crea entradas nuevas: incrementa el contador (`extra.count`) de la
+  existente, que conserva su fecha original.
+Por eso se recuerda cuántos borrados de cada entrada se han atribuido ya: si el contador
+sube, hay un borrado nuevo de ese moderador.
+"""
+
 import logging
+from collections import OrderedDict
+from typing import Optional, Tuple
+
+import discord
+
+from config import AUDIT_LOOKBACK_SECONDS
 
 logger = logging.getLogger(__name__)
 
+_MAX_TRACKED = 500
+_consumed: "OrderedDict[int, int]" = OrderedDict()        # entry.id -> borrados ya atribuidos
+_consumed_bulk: "OrderedDict[int, bool]" = OrderedDict()  # Entradas de borrado masivo ya usadas
 
-async def find_audit_entry_for_channel(
+
+def _remember(store: OrderedDict, key: int, value) -> None:
+    store[key] = value
+    store.move_to_end(key)
+    while len(store) > _MAX_TRACKED:
+        store.popitem(last=False)
+
+
+def _entry_count(entry: discord.AuditLogEntry) -> int:
+    return getattr(entry.extra, "count", None) or 1
+
+
+def _age_seconds(entry: discord.AuditLogEntry) -> float:
+    return (discord.utils.utcnow() - entry.created_at).total_seconds()
+
+
+async def prime(guild: discord.Guild) -> None:
+    """
+    Memoriza los contadores actuales al arrancar, para que tras un reinicio no se
+    atribuyan borrados antiguos a borrados nuevos.
+    """
+    try:
+        async for entry in guild.audit_logs(limit=100, action=discord.AuditLogAction.message_delete):
+            _remember(_consumed, entry.id, _entry_count(entry))
+        async for entry in guild.audit_logs(limit=25, action=discord.AuditLogAction.message_bulk_delete):
+            _remember(_consumed_bulk, entry.id, True)
+    except discord.Forbidden:
+        logger.warning("⚠️ Sin permiso 'Ver el registro de auditoría': no se sabrá quién borra los mensajes")
+    except discord.HTTPException as e:
+        logger.warning(f"No pude leer el registro de auditoría: {e}")
+
+
+async def find_deleter(
         guild: discord.Guild,
         channel_id: int,
-        limit: int = 20
-) -> Optional[discord.AuditLogEntry]:
+        author_id: Optional[int]
+) -> Tuple[Optional[discord.abc.User], bool]:
     """
-    Busca una entrada reciente de message_delete o message_bulk_delete relacionada con channel_id.
-
-    Args:
-        guild: El servidor de Discord
-        channel_id: ID del canal donde se eliminó el mensaje
-        limit: Número máximo de entradas a revisar
+    Busca qué moderador borró un mensaje de `author_id` en `channel_id`.
 
     Returns:
-        AuditLogEntry si se encuentra, None en caso contrario
+        (moderador, auditoría_disponible). Si no hay moderador pero la auditoría estaba
+        disponible, lo borró el propio autor (Discord no registra los autoborrados).
     """
-    now = datetime.now(timezone.utc)
-
-    # Buscar en message_delete
     try:
-        async for entry in guild.audit_logs(
-                limit=limit,
-                action=discord.AuditLogAction.message_delete
-        ):
-            # Verificar que la entrada sea reciente
-            delta = (now - entry.created_at).total_seconds()
-            if delta < 0 or delta > AUDIT_LOOKBACK_SECONDS:
+        async for entry in guild.audit_logs(limit=25, action=discord.AuditLogAction.message_delete):
+            channel = getattr(entry.extra, "channel", None)
+            if channel is None or channel.id != channel_id or getattr(entry.target, "id", None) != author_id:
                 continue
 
-            # Verificar si la entrada está relacionada con el canal
-            extra = getattr(entry, "extra", None)
-            if extra and hasattr(extra, "channel"):
-                channel = getattr(extra, "channel", None)
-                if channel and getattr(channel, "id", None) == channel_id:
-                    logger.debug(f"Entrada de auditoría encontrada: {entry.user} eliminó mensaje en canal {channel_id}")
-                    return entry
-
-            # Fallback: si tiene target y es reciente
-            if getattr(entry, "target", None) and delta <= AUDIT_LOOKBACK_SECONDS:
-                logger.debug(f"Entrada de auditoría (fallback) encontrada: {entry.user}")
-                return entry
-
+            count = _entry_count(entry)
+            seen = _consumed.get(entry.id)
+            if seen is None:
+                if _age_seconds(entry) <= AUDIT_LOOKBACK_SECONDS:
+                    _remember(_consumed, entry.id, 1)  # Entrada nueva: este es su primer borrado
+                    return entry.user, True
+                _remember(_consumed, entry.id, count)  # Entrada antigua: no corresponde a este borrado
+            elif count > seen:
+                _remember(_consumed, entry.id, seen + 1)  # El contador subió: borrado nuevo
+                return entry.user, True
+        return None, True
     except discord.Forbidden:
-        logger.warning("Permisos insuficientes para acceder al registro de auditoría")
-        return None
-    except Exception as e:
-        logger.error(f"Error al buscar en audit log (message_delete): {e}")
-        # Continuar con bulk_delete
-
-    # Buscar en message_bulk_delete
-    try:
-        async for entry in guild.audit_logs(
-                limit=10,
-                action=discord.AuditLogAction.message_bulk_delete
-        ):
-            delta = (now - entry.created_at).total_seconds()
-            if delta < 0 or delta > AUDIT_LOOKBACK_SECONDS:
-                continue
-
-            extra = getattr(entry, "extra", None)
-            if extra and hasattr(extra, "channel"):
-                channel = getattr(extra, "channel", None)
-                if channel and getattr(channel, "id", None) == channel_id:
-                    logger.debug(
-                        f"Entrada de bulk delete encontrada: {entry.user} eliminó mensajes en canal {channel_id}")
-                    return entry
-
-    except discord.Forbidden:
-        logger.warning("Permisos insuficientes para acceder al registro de auditoría (bulk)")
-        return None
-    except Exception as e:
-        logger.error(f"Error al buscar en audit log (bulk_delete): {e}")
-
-    logger.debug(f"No se encontró entrada de auditoría para el canal {channel_id}")
-    return None
+        return None, False
+    except discord.HTTPException as e:
+        logger.warning(f"No pude consultar el registro de auditoría: {e}")
+        return None, False
 
 
-async def get_recent_audit_entries(
-        guild: discord.Guild,
-        action: discord.AuditLogAction,
-        limit: int = 10
-) -> list[discord.AuditLogEntry]:
+async def find_bulk_deleter(guild: discord.Guild, channel_id: int) -> Tuple[Optional[discord.abc.User], bool]:
     """
-    Obtiene entradas recientes del registro de auditoría.
-
-    Args:
-        guild: El servidor de Discord
-        action: Acción a buscar
-        limit: Número máximo de entradas
+    Busca quién hizo un borrado masivo (purga) en `channel_id`.
 
     Returns:
-        Lista de entradas de auditoría
+        (responsable, auditoría_disponible)
     """
-    entries = []
     try:
-        async for entry in guild.audit_logs(limit=limit, action=action):
-            entries.append(entry)
+        async for entry in guild.audit_logs(limit=10, action=discord.AuditLogAction.message_bulk_delete):
+            if getattr(entry.target, "id", None) != channel_id or entry.id in _consumed_bulk:
+                continue
+            if _age_seconds(entry) <= AUDIT_LOOKBACK_SECONDS * 3:
+                _remember(_consumed_bulk, entry.id, True)
+                return entry.user, True
+        return None, True
     except discord.Forbidden:
-        logger.warning(f"Permisos insuficientes para acceder al registro de auditoría ({action})")
-    except Exception as e:
-        logger.error(f"Error al obtener entradas de auditoría: {e}")
-
-    return entries
+        return None, False
+    except discord.HTTPException as e:
+        logger.warning(f"No pude consultar el registro de auditoría (borrado masivo): {e}")
+        return None, False

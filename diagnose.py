@@ -1,211 +1,133 @@
 #!/usr/bin/env python3
 """
-Script de diagnóstico para problemas de voz en Discord bot
-Ejecuta esto en la consola de SparkedHost para ver qué falta
+Script de diagnóstico para problemas de voz y de YouTube en el bot de Discord.
+Ejecuta esto en la consola de SparkedHost (python diagnose.py) para ver qué falta.
 """
 
-import sys
+import importlib
 import os
+import shutil
+import subprocess
+import sys
+
+problems = []
+
+
+def check(title):
+    print(f"\n{title}")
+
 
 print("=" * 60)
-print("🔍 DIAGNÓSTICO DE VOZ - Discord Bot")
+print("🔍 DIAGNÓSTICO - ReimbouBOT")
 print("=" * 60)
-print()
 
-# Python version
-print(f"Python: {sys.version}")
-print(f"Prefix: {sys.prefix}")
-print()
+# --- Python ---
+check("🐍 Python")
+print(f"   {sys.version.split()[0]} ({sys.executable})")
+if sys.version_info < (3, 10):
+    print("   ❌ Se necesita Python 3.10 o superior (yt-dlp y deno ya no admiten versiones anteriores)")
+    problems.append("Cambia la versión de Python del servidor a 3.11 o 3.12 (en SparkedHost: pestaña Startup)")
+else:
+    print("   ✅ Versión compatible")
 
-# Verificar discord.py
-print("📦 Verificando discord.py...")
+# --- discord.py + DAVE ---
+check("📦 discord.py y cifrado de voz (DAVE)")
 try:
     import discord
-
-    print(f"✅ discord.py instalado: {discord.__version__}")
-
-    # Verificar si tiene soporte de voz
-    try:
-        from discord import opus
-
-        print(f"✅ discord.opus importable")
-    except ImportError as e:
-        print(f"❌ discord.opus no disponible: {e}")
-
-except ImportError as e:
-    print(f"❌ discord.py NO instalado: {e}")
-    print("   Ejecuta: pip3 install discord.py[voice] --prefix .local")
-print()
-
-# Verificar PyNaCl (CRÍTICO para voz)
-print("🔐 Verificando PyNaCl (encriptación de voz)...")
-try:
-    import nacl
-
-    print(f"✅ PyNaCl instalado: {nacl.__version__}")
-    print(f"   Ubicación: {nacl.__file__}")
-
-    # Verificar que puede importar componentes necesarios
-    try:
-        from nacl import secret, utils
-
-        print(f"✅ PyNaCl completamente funcional")
-    except ImportError as e:
-        print(f"⚠️  PyNaCl parcial: {e}")
-
-except ImportError as e:
-    print(f"❌ PyNaCl NO instalado: {e}")
-    print("   ⚠️  ESTE ES PROBABLEMENTE TU PROBLEMA")
-    print("   Ejecuta: pip3 install PyNaCl==1.5.0 --prefix .local --force-reinstall")
-print()
-
-# Verificar libsodium (sistema)
-print("🧪 Verificando libsodium (librería del sistema)...")
-try:
-    import ctypes.util
-
-    lib = ctypes.util.find_library('sodium')
-    if lib:
-        print(f"✅ libsodium encontrado: {lib}")
+    print(f"   discord.py {discord.__version__}")
+    if discord.version_info < (2, 7):
+        print("   ❌ Anterior a 2.7: desde marzo de 2026 Discord exige cifrado E2EE en voz y el bot no podrá entrar")
+        problems.append('pip install -U "discord.py[voice]"')
     else:
-        print(f"❌ libsodium NO encontrado en el sistema")
-        print("   Esto puede causar problemas con PyNaCl")
-        print("   Contacta a SparkedHost para que lo instalen")
-except Exception as e:
-    print(f"⚠️  No se pudo verificar: {e}")
-print()
+        print("   ✅ Soporta DAVE")
+except ImportError as e:
+    print(f"   ❌ discord.py NO instalado: {e}")
+    problems.append('pip install -U "discord.py[voice]"')
 
-# Verificar yt-dlp
-print("🎵 Verificando yt-dlp...")
+for module, fix in (("davey", 'pip install -U "discord.py[voice]"'),
+                    ("nacl", 'pip install -U "discord.py[voice]"')):
+    try:
+        mod = importlib.import_module(module)
+        print(f"   ✅ {module} {getattr(mod, '__version__', '')}")
+    except ImportError:
+        print(f"   ❌ Falta '{module}' (necesario para la voz)")
+        problems.append(fix)
+
+# --- Opus ---
+try:
+    import discord
+    if not discord.opus.is_loaded():
+        try:
+            discord.opus._load_default()
+        except Exception:
+            pass
+    print(f"   {'✅' if discord.opus.is_loaded() else '⚠️ '} Opus {'cargado' if discord.opus.is_loaded() else 'no cargado (puede ser normal hasta conectar a voz)'}")
+except Exception as e:
+    print(f"   ⚠️  No se pudo verificar Opus: {e}")
+
+# --- YouTube: yt-dlp, EJS y Deno ---
+check("🎵 YouTube (yt-dlp + Deno)")
 try:
     import yt_dlp
-
-    print(f"✅ yt-dlp instalado")
-    print(f"   Ubicación: {yt_dlp.__file__}")
+    print(f"   yt-dlp {yt_dlp.version.__version__}  (actualízalo a menudo: pip install -U \"yt-dlp[default]\")")
 except ImportError as e:
-    print(f"❌ yt-dlp NO instalado: {e}")
-    print("   Ejecuta: pip3 install yt-dlp --prefix .local")
-print()
+    print(f"   ❌ yt-dlp NO instalado: {e}")
+    problems.append('pip install -U "yt-dlp[default]"')
 
-# Verificar FFmpeg
-print("🎬 Verificando FFmpeg...")
-import subprocess
+try:
+    import yt_dlp_ejs  # noqa: F401
+    print("   ✅ yt-dlp-ejs instalado")
+except ImportError:
+    print("   ❌ Falta yt-dlp-ejs")
+    problems.append('pip install -U "yt-dlp[default]"')
 
+deno_path = None
+try:
+    import deno
+    deno_path = deno.find_deno_bin()
+except Exception:
+    deno_path = shutil.which("deno")
+if deno_path:
+    try:
+        out = subprocess.run([deno_path, "--version"], capture_output=True, text=True, timeout=20)
+        print(f"   ✅ Deno: {out.stdout.splitlines()[0] if out.stdout else deno_path}")
+    except Exception as e:
+        print(f"   ⚠️  Deno encontrado en {deno_path} pero no se pudo ejecutar: {e}")
+else:
+    print("   ❌ Deno no encontrado (YouTube irá peor o fallará)")
+    problems.append("pip install -U deno")
+
+# --- FFmpeg ---
+check("🎬 FFmpeg")
 try:
     result = subprocess.run(['ffmpeg', '-version'], capture_output=True, text=True, timeout=5)
-    if result.returncode == 0:
-        version_line = result.stdout.split('\n')[0]
-        print(f"✅ FFmpeg instalado: {version_line}")
-    else:
-        print(f"⚠️  FFmpeg responde pero con error")
+    print(f"   ✅ {result.stdout.splitlines()[0]}" if result.returncode == 0 else "   ⚠️  FFmpeg responde con error")
 except FileNotFoundError:
-    print(f"❌ FFmpeg NO encontrado")
-    print("   Contacta a SparkedHost para que lo instalen")
+    print("   ❌ FFmpeg NO encontrado")
+    problems.append("Instalar FFmpeg (en SparkedHost: pide soporte o usa una imagen de Python que lo incluya)")
 except Exception as e:
-    print(f"⚠️  Error al verificar FFmpeg: {e}")
-print()
+    print(f"   ⚠️  Error al verificar FFmpeg: {e}")
 
-# Verificar Opus (codec de audio)
-print("🎤 Verificando Opus...")
+# --- Configuración ---
+check("⚙️  Configuración (.env)")
 try:
-    import discord
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    problems.append("pip install -U python-dotenv")
+print(f"   {'✅' if os.environ.get('TOKEN') else '❌'} TOKEN")
+print(f"   {'✅' if os.environ.get('ADMIN_LOG_CHANNEL_ID') else '⚠️ '} ADMIN_LOG_CHANNEL_ID")
+if not os.environ.get('TOKEN'):
+    problems.append("Configura TOKEN en el archivo .env (copia .env.example)")
 
-    if discord.opus.is_loaded():
-        print(f"✅ Opus cargado correctamente")
-    else:
-        print(f"⚠️  Opus no cargado")
-        try:
-            discord.opus.load_opus('opus')
-            print(f"✅ Opus cargado manualmente")
-        except:
-            print(f"⚠️  No se pudo cargar Opus (puede ser normal)")
-except Exception as e:
-    print(f"⚠️  No se pudo verificar Opus: {e}")
-print()
-
-# Variables de entorno
-print("⚙️  Verificando configuración...")
-token_set = bool(os.environ.get('TOKEN'))
-channel_set = bool(os.environ.get('ADMIN_LOG_CHANNEL_ID'))
-
-if token_set:
-    print(f"✅ TOKEN configurado")
-else:
-    print(f"❌ TOKEN no configurado")
-
-if channel_set:
-    print(f"✅ ADMIN_LOG_CHANNEL_ID configurado")
-else:
-    print(f"⚠️  ADMIN_LOG_CHANNEL_ID no configurado")
-print()
-
-# Test de importación completo
-print("🧪 Test de importación completo...")
-try:
-    from discord.ext import commands
-    from discord import app_commands
-    import asyncio
-
-    print(f"✅ Todas las importaciones básicas OK")
-except ImportError as e:
-    print(f"❌ Error en importaciones: {e}")
-print()
-
-# Resumen
-print("=" * 60)
+# --- Resumen ---
+print("\n" + "=" * 60)
 print("📊 RESUMEN")
 print("=" * 60)
-
-issues = []
-
-# Verificar PyNaCl
-try:
-    import nacl
-except ImportError:
-    issues.append("❌ CRÍTICO: PyNaCl no instalado (causa error de voz)")
-
-# Verificar discord.py
-try:
-    import discord
-
-    if discord.__version__ < "2.0":
-        issues.append("⚠️  discord.py version antigua")
-except ImportError:
-    issues.append("❌ CRÍTICO: discord.py no instalado")
-
-# Verificar yt-dlp
-try:
-    import yt_dlp
-except ImportError:
-    issues.append("⚠️  yt-dlp no instalado (música no funcionará)")
-
-if not issues:
+if not problems:
     print("✅ ¡Todo parece estar OK!")
-    print()
-    print("Si aún tienes errores de voz, prueba:")
-    print("1. Reinstalar PyNaCl: pip3 install PyNaCl --prefix .local --force-reinstall")
-    print("2. Contactar a SparkedHost sobre libsodium")
 else:
-    print("⚠️  Se encontraron problemas:")
-    print()
-    for issue in issues:
-        print(f"  {issue}")
-    print()
-    print("🔧 SOLUCIONES:")
-    print()
-    if any("PyNaCl" in i for i in issues):
-        print("Para PyNaCl:")
-        print("  pip3 install PyNaCl==1.5.0 --prefix .local --force-reinstall --no-cache-dir")
-        print()
-    if any("discord.py" in i for i in issues):
-        print("Para discord.py:")
-        print("  pip3 install discord.py[voice]==2.4.0 --prefix .local --force-reinstall")
-        print()
-    if any("yt-dlp" in i for i in issues):
-        print("Para yt-dlp:")
-        print("  pip3 install yt-dlp --prefix .local")
-        print()
-
-print("=" * 60)
-print("Para más ayuda, consulta FIX_VOICE_ERROR.md")
+    print("⚠️  Se encontraron problemas. Soluciones (en SparkedHost añade --prefix .local a pip):\n")
+    for fix in dict.fromkeys(problems):  # sin repetidos, en orden
+        print(f"   • {fix}")
 print("=" * 60)

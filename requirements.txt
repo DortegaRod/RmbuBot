@@ -1,4 +1,8 @@
-discord.py[voice]>=2.4.0
-yt-dlp>=2024.12.23
-PyNaCl>=1.5.0
+# Voz: desde marzo de 2026 Discord exige cifrado E2EE (DAVE). discord.py 2.7+ con [voice] instala 'davey' y PyNaCl.
+discord.py[voice]>=2.7.1
+# YouTube: [default] incluye yt-dlp-ejs, que junto con Deno resuelve los retos JavaScript de YouTube.
+# Actualízalo a menudo: YouTube cambia constantemente.
+yt-dlp[default]>=2026.8.19
+deno>=2.9
+aiohttp>=3.9
 python-dotenv>=1.0.1

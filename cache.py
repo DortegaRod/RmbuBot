@@ -1,15 +1,21 @@
 from collections import OrderedDict
-from typing import Optional, Tuple
+from typing import Optional
 from config import CACHE_MAX
 import logging
 
 logger = logging.getLogger(__name__)
 
-# Cache: message_id -> (author_id, content)
-_message_cache: OrderedDict[int, Tuple[int, str]] = OrderedDict()
+# Cache: message_id -> {author_id, author_name, content, channel_id, edited_content}
+_message_cache: OrderedDict[int, dict] = OrderedDict()
 
 
-def cache_message(message_id: int, author_id: int, content: str) -> None:
+def cache_message(
+        message_id: int,
+        author_id: int,
+        content: str,
+        author_name: Optional[str] = None,
+        channel_id: Optional[int] = None
+) -> None:
     """
     Almacena un mensaje en el cache LRU.
 
@@ -17,9 +23,17 @@ def cache_message(message_id: int, author_id: int, content: str) -> None:
         message_id: ID del mensaje
         author_id: ID del autor
         content: Contenido del mensaje
+        author_name: Nombre del autor al escribirlo
+        channel_id: ID del canal
     """
     try:
-        _message_cache[message_id] = (author_id, content)
+        _message_cache[message_id] = {
+            "author_id": author_id,
+            "author_name": author_name,
+            "content": content,
+            "channel_id": channel_id,
+            "edited_content": None,
+        }
 
         # Mantener LRU - eliminar los más antiguos
         while len(_message_cache) > CACHE_MAX:
@@ -29,7 +43,7 @@ def cache_message(message_id: int, author_id: int, content: str) -> None:
         logger.error(f"Error al cachear mensaje {message_id}: {e}")
 
 
-def get_cached(message_id: int) -> Optional[Tuple[int, str]]:
+def get_cached(message_id: int) -> Optional[dict]:
     """
     Recupera un mensaje del cache.
 
@@ -37,7 +51,7 @@ def get_cached(message_id: int) -> Optional[Tuple[int, str]]:
         message_id: ID del mensaje a buscar
 
     Returns:
-        Tupla (author_id, content) o None si no está en cache
+        Diccionario con los datos del mensaje o None si no está en cache
     """
     try:
         val = _message_cache.get(message_id)
@@ -50,6 +64,20 @@ def get_cached(message_id: int) -> Optional[Tuple[int, str]]:
     except Exception as e:
         logger.error(f"Error al recuperar del cache mensaje {message_id}: {e}")
         return None
+
+
+def update_cached(message_id: int, **fields) -> bool:
+    """
+    Actualiza campos de un mensaje cacheado (p. ej. edited_content).
+
+    Returns:
+        True si estaba en cache, False en caso contrario
+    """
+    record = _message_cache.get(message_id)
+    if record is None:
+        return False
+    record.update(fields)
+    return True
 
 
 def remove_cached(message_id: int) -> bool:
