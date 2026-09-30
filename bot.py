@@ -25,6 +25,7 @@ from music import (
     log_dependency_status, LOOP_LABELS, SearchError, Song
 )
 from radios import RADIOS, RADIOS_BY_KEY, RADIO_ICON, fetch_now_playing
+from palabra import PalabraCog
 
 # --- INICIALIZACIÓN ---
 logger = logging.getLogger(__name__)
@@ -54,6 +55,8 @@ class MusicBot(commands.Bot):
         music_manager.on_player_end = controls.delete_now_playing
         # Botones persistentes: las tarjetas antiguas siguen respondiendo tras un reinicio
         self.add_view(controls.NowPlayingView())
+        # Juego diario: /palabra, /palabra-stats, /setup-palabra y el anuncio de cada día
+        await self.add_cog(PalabraCog(self))
         # Sincroniza los comandos de barra (Slash Commands) con Discord al iniciar
         await self.tree.sync()
 
@@ -749,8 +752,20 @@ async def help_cmd(interaction: discord.Interaction):
         inline=False
     )
     embed.add_field(
+        name="🟩 Palabra del día",
+        value=(
+            "`/palabra` — Adivina la palabra de hoy en 6 intentos (Wordle en español)\n"
+            "`/palabra-stats [usuario]` — Estadísticas y rachas"
+        ),
+        inline=False
+    )
+    embed.add_field(
         name="⚙️ Administración",
-        value="`/setup <canal>` — Fija el canal de comandos del bot *(requiere Gestionar servidor)*",
+        value=(
+            "`/setup <canal>` — Fija el canal de comandos del bot\n"
+            "`/setup-palabra <canal> [hora]` — Canal y hora del anuncio diario de la palabra\n"
+            "*(requieren Gestionar servidor)*"
+        ),
         inline=False
     )
     embed.set_footer(text="ReimbouBOT")

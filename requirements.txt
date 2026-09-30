@@ -6,3 +6,5 @@ yt-dlp[default]>=2026.8.19
 deno>=2.9
 aiohttp>=3.9
 python-dotenv>=1.0.1
+# Zona horaria de España (la palabra del día cambia a medianoche) aunque el servidor no traiga la suya
+tzdata>=2024.1
