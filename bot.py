@@ -763,7 +763,7 @@ async def help_cmd(interaction: discord.Interaction):
         name="⚙️ Administración",
         value=(
             "`/setup <canal>` — Fija el canal de comandos del bot\n"
-            "`/setup-palabra <canal> [hora]` — Canal y hora del anuncio diario de la palabra\n"
+            "`/setup-palabra <canal> [hora] [rol]` — Canal, hora y rol al que avisar del anuncio diario de la palabra\n"
             "*(requieren Gestionar servidor)*"
         ),
         inline=False

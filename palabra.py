@@ -4,7 +4,8 @@ Palabra del día: el Wordle en español del server.
 - Una palabra de 5 letras al día, la misma en todos los servidores; cambia a medianoche (hora de España).
 - Cada persona juega en privado con /palabra: 6 intentos, las tildes no cuentan (la ñ sí).
 - Al terminar, el bot publica sus cuadritos (sin letras) en el canal del juego.
-- A la hora configurada con /setup-palabra, el bot anuncia la nueva palabra y revela la de ayer.
+- A la hora configurada con /setup-palabra, el bot anuncia la nueva palabra (mencionando al rol
+  elegido, si hay uno) y revela la de ayer.
 
 Diccionario: lista de palabras de Letterpress (github.com/lorenbrichter/Words, dominio público CC0).
 """
@@ -127,7 +128,8 @@ _SCHEMA = (
         guild_id INTEGER PRIMARY KEY,
         channel_id INTEGER NOT NULL,
         hora INTEGER NOT NULL DEFAULT 10,
-        ultimo_anuncio TEXT
+        ultimo_anuncio TEXT,
+        role_id INTEGER
     )""",
 )
 
@@ -136,6 +138,10 @@ def init_db():
     with db.get_db_connection() as conn:
         for sql in _SCHEMA:
             conn.execute(sql)
+        # Bases de datos creadas antes de que existiera el rol del anuncio
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(palabra_config)")}
+        if "role_id" not in columns:
+            conn.execute("ALTER TABLE palabra_config ADD COLUMN role_id INTEGER")
 
 
 @dataclass
@@ -156,6 +162,7 @@ class GameConfig:
     channel_id: int
     hora: int
     ultimo_anuncio: Optional[str]
+    role_id: Optional[int] = None  # Rol al que se menciona en el anuncio diario
 
 
 def find_word(day: date) -> Optional[Tuple[int, str]]:
@@ -221,16 +228,20 @@ def user_results(user_id: int) -> Dict[date, Tuple[bool, int]]:
             for r in rows}
 
 
+def _row_to_config(row) -> GameConfig:
+    return GameConfig(row["guild_id"], row["channel_id"], row["hora"], row["ultimo_anuncio"], row["role_id"])
+
+
 def get_config(guild_id: int) -> Optional[GameConfig]:
     with db.get_db_connection() as conn:
         row = conn.execute("SELECT * FROM palabra_config WHERE guild_id = ?", (guild_id,)).fetchone()
-    return GameConfig(row["guild_id"], row["channel_id"], row["hora"], row["ultimo_anuncio"]) if row else None
+    return _row_to_config(row) if row else None
 
 
 def all_configs() -> List[GameConfig]:
     with db.get_db_connection() as conn:
         rows = conn.execute("SELECT * FROM palabra_config").fetchall()
-    return [GameConfig(r["guild_id"], r["channel_id"], r["hora"], r["ultimo_anuncio"]) for r in rows]
+    return [_row_to_config(r) for r in rows]
 
 
 def set_config(guild_id: int, channel_id: int, hora: int):
@@ -240,6 +251,12 @@ def set_config(guild_id: int, channel_id: int, hora: int):
             "ON CONFLICT(guild_id) DO UPDATE SET channel_id = excluded.channel_id, hora = excluded.hora",
             (guild_id, channel_id, hora)
         )
+
+
+def set_role(guild_id: int, role_id: Optional[int]):
+    """Rol al que mencionar en el anuncio diario (None = no mencionar a nadie)."""
+    with db.get_db_connection() as conn:
+        conn.execute("UPDATE palabra_config SET role_id = ? WHERE guild_id = ?", (role_id, guild_id))
 
 
 def clear_config(guild_id: int):
@@ -579,12 +596,14 @@ class PalabraCog(commands.Cog):
             )
         await interaction.response.send_message(embed=stats_embed(member, stats))
 
-    @app_commands.command(name="setup-palabra", description="Canal y hora del anuncio diario de la palabra (solo admins)")
+    @app_commands.command(name="setup-palabra", description="Canal, hora y rol del anuncio diario de la palabra (solo admins)")
     @app_commands.guild_only()
     @app_commands.default_permissions(manage_guild=True)
     @app_commands.describe(
         canal="Canal del juego: anuncio diario y resultados (vacío = ver la configuración)",
         hora="Hora del anuncio diario, de 0 a 23 (hora de España). Por defecto, las 10",
+        rol="Rol al que avisar (mencionar) en cada anuncio diario",
+        quitar_rol="Deja de mencionar a un rol en el anuncio",
         quitar="Desactiva el anuncio diario (/palabra sigue funcionando)",
     )
     async def setup_palabra(
@@ -592,6 +611,8 @@ class PalabraCog(commands.Cog):
             interaction: discord.Interaction,
             canal: Optional[Union[discord.TextChannel, discord.VoiceChannel]] = None,
             hora: Optional[app_commands.Range[int, 0, 23]] = None,
+            rol: Optional[discord.Role] = None,
+            quitar_rol: bool = False,
             quitar: bool = False
     ):
         if not interaction.user.guild_permissions.manage_guild:
@@ -605,18 +626,26 @@ class PalabraCog(commands.Cog):
             )
 
         config = get_config(interaction.guild_id)
-        if canal is None and hora is None:
-            status = (f"📌 La palabra del día se anuncia a las **{config.hora:02d}:00** en <#{config.channel_id}>."
-                      if config else "📌 No hay anuncio diario configurado.")
+        if canal is None and hora is None and rol is None and not quitar_rol:
+            if config:
+                aviso = f", avisando a <@&{config.role_id}>" if config.role_id else ", sin avisar a ningún rol"
+                status = f"📌 La palabra del día se anuncia a las **{config.hora:02d}:00** en <#{config.channel_id}>{aviso}."
+            else:
+                status = "📌 No hay anuncio diario configurado."
             return await interaction.response.send_message(
-                f"{status}\nUsa `/setup-palabra canal:#canal hora:10` para cambiarlo o `quitar:True` para desactivarlo.",
-                ephemeral=True
+                f"{status}\nUsa `/setup-palabra canal:#canal hora:10 rol:@rol` para cambiarlo, "
+                f"`quitar_rol:True` para no avisar a nadie o `quitar:True` para desactivarlo.",
+                ephemeral=True, allowed_mentions=NO_MENTIONS
             )
 
         channel = canal or (interaction.guild.get_channel(config.channel_id) if config else None)
         if channel is None:
             return await interaction.response.send_message(
                 "❌ Indica el canal del juego: `/setup-palabra canal:#canal`.", ephemeral=True
+            )
+        if rol is not None and (rol.is_default() or rol.managed):
+            return await interaction.response.send_message(
+                "❌ Elige un rol normal: ni @everyone ni el rol propio de un bot.", ephemeral=True
             )
         perms = channel.permissions_for(interaction.guild.me)
         if not (perms.view_channel and perms.send_messages and perms.embed_links):
@@ -627,10 +656,22 @@ class PalabraCog(commands.Cog):
 
         new_hour = hora if hora is not None else (config.hora if config else DEFAULT_HOUR)
         set_config(interaction.guild_id, channel.id, new_hour)
-        await interaction.response.send_message(
-            f"✅ La palabra del día se anunciará cada día a las **{new_hour:02d}:00** en {channel.mention}, "
-            f"y los resultados de cada uno se publicarán ahí."
-        )
+        if rol is not None:
+            set_role(interaction.guild_id, rol.id)
+        elif quitar_rol:
+            set_role(interaction.guild_id, None)
+        role_id = get_config(interaction.guild_id).role_id
+        role = interaction.guild.get_role(role_id) if role_id else None
+
+        message = f"✅ La palabra del día se anunciará cada día a las **{new_hour:02d}:00** en {channel.mention}"
+        message += f", avisando a {role.mention}." if role else "."
+        message += "\nLos resultados de cada uno también se publicarán ahí."
+        if role and not (role.mentionable or perms.mention_everyone):
+            message += (f"\n⚠️ Ahora mismo la mención **no avisaría**: en Ajustes del servidor → Roles → "
+                        f"**{escape_markdown(role.name)}**, activa «Permitir que cualquiera @mencione este rol» "
+                        f"(o dale al bot el permiso «Mencionar @everyone, @here y todos los roles»).")
+        # Sin avisar a nadie al configurarlo: la mención de verdad solo sale en el anuncio diario
+        await interaction.response.send_message(message, allowed_mentions=NO_MENTIONS)
 
     @tasks.loop(minutes=1)
     async def announcer(self):
@@ -649,8 +690,17 @@ class PalabraCog(commands.Cog):
                 if channel is None:
                     logger.warning(f"Palabra del día: no encuentro el canal {config.channel_id} del servidor {config.guild_id}")
                     continue
+                role = guild.get_role(config.role_id) if config.role_id else None
+                if config.role_id and role is None:
+                    logger.warning(f"Palabra del día: el rol {config.role_id} ya no existe en el servidor {config.guild_id}")
                 try:
-                    await channel.send(embed=announcement_embed(guild, now.date()), allowed_mentions=NO_MENTIONS)
+                    # La mención va en el texto del mensaje: dentro de un embed no avisaría a nadie
+                    await channel.send(
+                        content=role.mention if role else None,
+                        embed=announcement_embed(guild, now.date()),
+                        allowed_mentions=(discord.AllowedMentions(everyone=False, users=False, roles=[role])
+                                          if role else NO_MENTIONS),
+                    )
                 except discord.HTTPException as e:
                     logger.warning(f"No pude publicar el anuncio de la palabra del día en #{channel}: {e}")
         except Exception:
