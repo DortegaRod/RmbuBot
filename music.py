@@ -8,9 +8,11 @@ import asyncio
 import logging
 import platform
 import random
+import re
 import shlex
 import shutil
 import struct
+import subprocess
 import time
 from collections import deque
 from dataclasses import dataclass
@@ -481,6 +483,51 @@ def _is_active(voice_client: discord.VoiceClient, player: MusicPlayer) -> bool:
     return voice_client.is_connected() and music_manager.peek(player.guild.id) is player
 
 
+class _StderrTail:
+    """
+    Guarda lo último que FFmpeg escribe en su salida de errores, para poder explicar por qué
+    falló una canción. discord.py no lo transmite cuando el audio pasa por PCMVolumeTransformer.
+    """
+
+    def __init__(self, limit: int = 4000):
+        self._limit = limit
+        self._data = bytearray()
+
+    def write(self, chunk: bytes) -> int:  # Lo llama discord.py desde su hilo lector
+        self._data += chunk
+        del self._data[:-self._limit]
+        return len(chunk)
+
+    def text(self) -> str:
+        return self._data.decode("utf-8", "replace").strip()
+
+
+def _explain_playback_failure(ffmpeg_text: str, error, connected: bool) -> str:
+    """Motivo legible de que una pista se cortara al empezar (sin mostrar enlaces)."""
+    low = ffmpeg_text.lower()
+    if "403" in low:
+        return "YouTube rechazó la descarga del audio, error 403"
+    if "404" in low:
+        return "el enlace de audio ya no existe, error 404"
+    if any(k in low for k in ("timed out", "connection refused", "network is unreachable", "connection reset",
+                              "name or service not known", "temporary failure in name resolution")):
+        return "fallo de red al descargar el audio"
+    if "unrecognized option" in low or "option not found" in low:
+        return "esta versión de FFmpeg no reconoce una opción; actualízala"
+    if "invalid data found" in low:
+        return "FFmpeg no entiende el audio recibido"
+    if "protocol not found" in low:
+        return "FFmpeg no tiene soporte para HTTPS"
+    if ffmpeg_text:
+        last_line = re.sub(r"https?://\S+", "<enlace>", ffmpeg_text.splitlines()[-1])
+        return f"FFmpeg dice: {last_line[:150]}"
+    if error:
+        return f"{type(error).__name__}: {str(error)[:150]}"
+    if not connected:
+        return "se perdió la conexión de voz"
+    return "sin detalles, revisa el log del bot"
+
+
 async def play_next(voice_client: discord.VoiceClient, player: MusicPlayer):
     """
     Motor de reproducción. Obtiene la siguiente canción, extrae el flujo de audio
@@ -515,11 +562,13 @@ async def play_next(voice_client: discord.VoiceClient, player: MusicPlayer):
                 if not _is_active(voice_client, player):
                     return  # Pararon la música mientras se extraía el audio
                 try:
-                    raw_source = discord.FFmpegPCMAudio(song.stream_url, **_ffmpeg_options(song))
+                    ffmpeg_log = _StderrTail()
+                    raw_source = discord.FFmpegPCMAudio(song.stream_url, stderr=ffmpeg_log, **_ffmpeg_options(song))
                     # Envolvemos en PCMVolumeTransformer para permitir ajuste de volumen en vivo (/volume)
                     source = discord.PCMVolumeTransformer(raw_source, volume=player.volume)
                     loop = asyncio.get_running_loop()
-                    voice_client.play(source, after=lambda e, s=song: _schedule_track_end(loop, voice_client, player, s, e))
+                    voice_client.play(source, after=lambda e, s=song, f=ffmpeg_log:
+                                      _schedule_track_end(loop, voice_client, player, s, e, f))
                     player.mark_started()  # Arranca el cronómetro para la barra de progreso
                     logger.info(f"▶️ Sonando: {song.title}")
                     await music_manager.notify('on_track_start', player, song)
@@ -541,10 +590,13 @@ async def play_next(voice_client: discord.VoiceClient, player: MusicPlayer):
                 return
 
 
-def _schedule_track_end(loop, voice_client, player: MusicPlayer, song: Song, error):
+def _schedule_track_end(loop, voice_client, player: MusicPlayer, song: Song, error,
+                        ffmpeg_log: Optional[_StderrTail] = None):
     """Callback 'after' de discord.py: se ejecuta en el hilo de audio al terminar una pista."""
     elapsed = player.get_elapsed()
-    future = asyncio.run_coroutine_threadsafe(_on_track_end(voice_client, player, song, error, elapsed), loop)
+    future = asyncio.run_coroutine_threadsafe(
+        _on_track_end(voice_client, player, song, error, elapsed, ffmpeg_log), loop
+    )
     future.add_done_callback(_log_future_error)
 
 
@@ -553,7 +605,8 @@ def _log_future_error(future):
         logger.error("Error en el motor de reproducción", exc_info=future.exception())
 
 
-async def _on_track_end(voice_client, player: MusicPlayer, song: Song, error, elapsed: float):
+async def _on_track_end(voice_client, player: MusicPlayer, song: Song, error, elapsed: float,
+                        ffmpeg_log: Optional[_StderrTail] = None):
     """Decide qué hacer al terminar una pista y pone la siguiente."""
     if music_manager.peek(player.guild.id) is not player:
         return  # Se paró la música o se desconectó el bot
@@ -563,16 +616,25 @@ async def _on_track_end(voice_client, player: MusicPlayer, song: Song, error, el
     very_short_song = bool(song.duration and song.duration <= FAST_FAIL_SECONDS + 1)
     failed_to_start = elapsed < FAST_FAIL_SECONDS and not very_short_song and not player.skip_requested
     if failed_to_start and player.current is song:
-        # FFmpeg se cerró nada más empezar: la URL no vale (p. ej. caducó). Un reintento con URL nueva.
+        # FFmpeg se cerró nada más empezar. Se espera un instante a que llegue su mensaje de error
+        # (lo escribe justo al cerrarse) para dejarlo en el log y poder explicarlo.
+        await asyncio.sleep(0.3)
+        if music_manager.peek(player.guild.id) is not player:
+            return
+        ffmpeg_text = ffmpeg_log.text() if ffmpeg_log else ""
+        logger.warning(f"'{song.title}' se cortó a los {elapsed:.1f}s. FFmpeg: {ffmpeg_text or '(sin mensajes)'}")
         player.current = None
         if not song.retried:
+            # Un reintento con una URL nueva (la anterior pudo caducar)
             song.retried = True
             if not song.is_radio:
                 song.stream_url = None
             player.queue.appendleft(song)
         else:
-            logger.warning(f"'{song.title}' se cortó nada más empezar dos veces; se descarta")
-            await music_manager.notify('on_track_error', player, song, "la transmisión se cortó nada más empezar")
+            reason = _explain_playback_failure(ffmpeg_text, error, voice_client.is_connected())
+            logger.warning(f"'{song.title}' se cortó nada más empezar dos veces; se descarta ({reason})")
+            await music_manager.notify('on_track_error', player, song,
+                                       f"la transmisión se cortó nada más empezar ({reason})")
     else:
         song.retried = False
 
@@ -647,5 +709,12 @@ def log_dependency_status():
                     "si algún día empieza a fallar, la solución es pasar a un sistema de 64 bits.")
     else:
         logger.warning("⚠️ Deno no encontrado: YouTube puede fallar o dar peor calidad. Instálalo: pip install -U deno")
-    if shutil.which("ffmpeg") is None:
+    ffmpeg = shutil.which("ffmpeg")
+    if ffmpeg is None:
         logger.error("❌ FFmpeg no encontrado: la música no funcionará (Raspberry Pi OS: sudo apt install ffmpeg)")
+    else:
+        try:
+            version = subprocess.run([ffmpeg, "-version"], capture_output=True, text=True, timeout=10).stdout
+            logger.info(f"🎬 {version.splitlines()[0]}")
+        except Exception as e:
+            logger.warning(f"⚠️ FFmpeg está en {ffmpeg} pero no responde: {e}")
