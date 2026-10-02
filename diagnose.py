@@ -55,7 +55,13 @@ if sys.version_info < (3, 10):
 else:
     print("   ✅ Versión compatible")
 if sys.prefix == sys.base_prefix:
-    print("   ⚠️  No estás en un entorno virtual: ¿has activado el del bot? (source .venv/bin/activate)")
+    here = Path(__file__).parent
+    venv = next((d for d in ("venv", ".venv", "env")
+                 if (here / d / "bin" / "activate").exists() or (here / d / "Scripts" / "activate").exists()), None)
+    activate = f"source {venv}/bin/activate" if venv else "source venv/bin/activate"
+    print(f"   ⚠️  No estás en el entorno virtual del bot: actívalo con  {activate}")
+    problems.append(f"PRIMERO activa el entorno virtual del bot ({activate}) y repite: "
+                    f"fuera de él, lo que sale abajo sobre paquetes no es fiable")
 
 # --- discord.py + DAVE ---
 check("📦 discord.py y cifrado de voz (DAVE)")
