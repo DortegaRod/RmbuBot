@@ -43,7 +43,7 @@ DEFAULT_HOUR = 10
 DATA_DIR = Path(__file__).parent / "datos"
 
 GREEN, YELLOW, GRAY, EMPTY = "🟩", "🟨", "⬛", "⬜"
-HIDDEN = "❔"  # Primera fila de los resultados publicados
+HIDDEN = EMPTY  # Primera fila de los resultados publicados (tapada, como las filas vacías del tablero)
 NO_MENTIONS = discord.AllowedMentions.none()
 
 VALID_WORDS: set = set()  # Palabras aceptadas como intento (normalizadas: sin tildes)
