@@ -7,6 +7,8 @@ Sustituye al sistema de Amari con sus mismos ajustes, para que los niveles impor
   no cuenta ensordecido ni en el canal AFK.
 - Nivel N con 20·N² − 40·N + 55 de experiencia total (la fórmula de Amari).
 - Roles de recompensa acumulativos y aviso de subida de nivel en el canal configurado.
+- Todo va por persona: las cuentas vinculadas (cuentas.py) suman su experiencia y comparten
+  la espera entre mensajes y el tiempo en voz (dos cuentas a la vez no dan el doble).
 
 Solo cuenta en los servidores donde un admin lo activa con /setup-niveles.
 """
@@ -17,6 +19,7 @@ import math
 import re
 import time
 from collections import defaultdict
+from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Union
 
 import discord
@@ -24,6 +27,7 @@ from discord import app_commands
 from discord.ext import commands, tasks
 from discord.utils import escape_markdown
 
+import cuentas
 import db
 
 logger = logging.getLogger(__name__)
@@ -38,11 +42,20 @@ GLOBAL_MULTIPLIER = 1
 
 RANKING_PAGE_SIZE = 10
 MAX_IMPORT_BYTES = 1_000_000
+MAX_MESSAGE_LENGTH = 2000  # Límite de Discord por mensaje
+LINKS_FILE = Path(__file__).parent / "datos" / "cuentas_vinculadas.txt"
 
 
 def _fmt(number: int) -> str:
     """68565 -> '68.565'."""
     return f"{number:,}".replace(",", ".")
+
+
+def _clip_lines(text: str, limit: int) -> str:
+    """Corta un listado por la última línea entera que quepa en `limit` caracteres (contando el «…» final)."""
+    if len(text) <= limit:
+        return text
+    return text[:max(0, limit - 2)].rsplit("\n", 1)[0] + "\n…"
 
 
 # ==========================================
@@ -103,10 +116,17 @@ def init_db():
             conn.execute(sql)
 
 
-def add_xp(guild_id: int, user_id: int, amount: int) -> int:
+def _sum_xp(conn, guild_id: int, group: List[int]) -> int:
+    placeholders = ",".join("?" * len(group))
+    row = conn.execute(f"SELECT COALESCE(SUM(xp), 0) FROM niveles_xp WHERE guild_id = ? AND user_id IN ({placeholders})",
+                       (guild_id, *group)).fetchone()
+    return row[0]
+
+
+def add_xp(guild_id: int, user_id: int, amount: int, group: List[int]) -> int:
     """
-    Suma experiencia y devuelve el total nuevo. La suma y la lectura van en la misma transacción,
-    así que es correcto aunque lleguen dos a la vez (mensaje y voz).
+    Suma experiencia a una cuenta y devuelve el total de la persona (todas sus cuentas).
+    La suma y la lectura van en la misma transacción: es correcto aunque lleguen dos a la vez.
     """
     with db.get_db_connection() as conn:
         conn.execute(
@@ -114,26 +134,25 @@ def add_xp(guild_id: int, user_id: int, amount: int) -> int:
             "ON CONFLICT(guild_id, user_id) DO UPDATE SET xp = xp + excluded.xp",
             (guild_id, user_id, amount)
         )
-        row = conn.execute("SELECT xp FROM niveles_xp WHERE guild_id = ? AND user_id = ?",
-                           (guild_id, user_id)).fetchone()
-    return row[0]
+        return _sum_xp(conn, guild_id, group)
 
 
-def set_xp(guild_id: int, user_id: int, xp: int):
+def person_xp(guild_id: int, group: List[int]) -> int:
+    """Experiencia total de una persona (suma de sus cuentas)."""
     with db.get_db_connection() as conn:
-        conn.execute("INSERT OR REPLACE INTO niveles_xp (guild_id, user_id, xp) VALUES (?, ?, ?)",
-                     (guild_id, user_id, xp))
+        return _sum_xp(conn, guild_id, group)
 
 
-def get_xp(guild_id: int, user_id: int) -> int:
+def set_person_xp(guild_id: int, group: List[int], xp: int):
+    """Pone a una persona una experiencia total exacta: toda en la cuenta principal, el resto a 0."""
     with db.get_db_connection() as conn:
-        row = conn.execute("SELECT xp FROM niveles_xp WHERE guild_id = ? AND user_id = ?",
-                           (guild_id, user_id)).fetchone()
-    return row[0] if row else 0
+        for index, user_id in enumerate(group):
+            conn.execute("INSERT OR REPLACE INTO niveles_xp (guild_id, user_id, xp) VALUES (?, ?, ?)",
+                         (guild_id, user_id, xp if index == 0 else 0))
 
 
 def ranking_rows(guild_id: int) -> List[Tuple[int, int]]:
-    """(user_id, xp) de mayor a menor."""
+    """(user_id, xp) de cada cuenta, de mayor a menor."""
     with db.get_db_connection() as conn:
         rows = conn.execute("SELECT user_id, xp FROM niveles_xp WHERE guild_id = ? AND xp > 0 "
                             "ORDER BY xp DESC, user_id", (guild_id,)).fetchall()
@@ -218,10 +237,21 @@ def parse_amari_leaderboard(text: str) -> List[Tuple[str, int, int]]:
     return entries
 
 
-def match_members(members: List[discord.Member], entries: List[Tuple[str, int, int]]) -> Tuple[Dict[int, int], List[str], int]:
+def read_link_groups() -> List[str]:
+    """Grupos de datos/cuentas_vinculadas.txt (una persona por línea)."""
+    try:
+        lines = LINKS_FILE.read_text(encoding="utf-8-sig").splitlines()  # -sig: por si el Bloc de notas pone BOM
+    except OSError:
+        return []
+    return [line.strip() for line in lines if line.strip() and not line.lstrip().startswith("#")]
+
+
+def plan_import(guild_id: int, members: List[discord.Member],
+                entries: List[Tuple[str, int, int]]) -> Tuple[Dict[int, int], List[str], int]:
     """
-    Asocia cada nombre de la clasificación con un miembro del servidor (por usuario,
-    nombre global o apodo). Devuelve ({user_id: experiencia}, problemas, nº de «Unknown»).
+    Reparte la clasificación entre las personas del servidor, buscando cada nombre por usuario,
+    nombre global o apodo y sumando las cuentas vinculadas.
+    Devuelve ({cuenta principal: experiencia total}, problemas, nº de «Unknown»).
     """
     index: Dict[str, Dict[int, discord.Member]] = defaultdict(dict)
     for member in members:
@@ -231,7 +261,7 @@ def match_members(members: List[discord.Member], entries: List[Tuple[str, int, i
             if name:
                 index[name.casefold()][member.id] = member
 
-    found: Dict[int, Dict[int, str]] = defaultdict(dict)  # user_id -> {experiencia: nombre}
+    found: Dict[int, Dict[Tuple[str, int], str]] = defaultdict(dict)  # principal -> {(nombre, exp): nombre original}
     problems: List[str] = []
     unknown = 0
     for name, xp, level in entries:
@@ -242,22 +272,27 @@ def match_members(members: List[discord.Member], entries: List[Tuple[str, int, i
             problems.append(f"«{name}»: {_fmt(xp)} de experiencia no da nivel {level}; revísalo")
             continue
         candidates = index.get(name.casefold(), {})
-        if len(candidates) == 1:
-            found[next(iter(candidates))][xp] = name
-        elif not candidates:
+        people = {cuentas.principal_of(guild_id, user_id) for user_id in candidates}
+        if not people:
             problems.append(f"«{name}» ({_fmt(xp)} exp): no lo encuentro en el servidor")
+        elif len(people) > 1:
+            problems.append(f"«{name}» ({_fmt(xp)} exp): hay {len(people)} personas distintas con ese nombre "
+                            f"(vincúlalas si son la misma)")
         else:
-            problems.append(f"«{name}» ({_fmt(xp)} exp): hay {len(candidates)} personas con ese nombre")
+            # Repetido con la misma experiencia = la misma entrada (pasa al cambiar de página en la web)
+            found[people.pop()][(name.casefold(), xp)] = name
 
-    resolved: Dict[int, int] = {}
-    for user_id, by_xp in found.items():
-        if len(by_xp) == 1:
-            resolved[user_id] = next(iter(by_xp))  # Si sale repetido con lo mismo, se importa una vez
-        else:
-            amounts = " y ".join(_fmt(xp) for xp in sorted(by_xp, reverse=True))
-            problems.append(f"«{next(iter(by_xp.values()))}» sale varias veces ({amounts} exp) y solo "
-                            f"encuentro a una persona con ese nombre")
-    return resolved, problems, unknown
+    totals: Dict[int, int] = {}
+    for principal, person_entries in found.items():
+        accounts = len(cuentas.group_of(guild_id, principal))
+        if len(person_entries) > accounts:
+            amounts = " y ".join(_fmt(xp) for _, xp in sorted(person_entries, key=lambda e: -e[1]))
+            problems.append(f"«{next(iter(person_entries.values()))}» sale {len(person_entries)} veces ({amounts} exp) "
+                            f"pero aquí tiene {accounts} {'cuenta' if accounts == 1 else 'cuentas'}; "
+                            f"si las otras son suyas, vincúlalas")
+            continue
+        totals[principal] = sum(xp for _, xp in person_entries)
+    return totals, problems, unknown
 
 
 # ==========================================
@@ -296,43 +331,57 @@ class NivelesCog(commands.Cog):
     async def cog_load(self):
         init_db()
         self.reload_settings()
+        cuentas.on_linked = self.on_linked
         self.voice_xp.start()
 
     async def cog_unload(self):
         self.voice_xp.cancel()
+        cuentas.on_linked = None
 
     def reload_settings(self):
         self.channels, self.multipliers, self.rewards = load_settings()
 
     # ---------- Experiencia ----------
 
-    async def award(self, guild: discord.Guild, member: discord.Member, amount: int, announce: bool = True):
-        """Suma experiencia y, si sube de nivel, da las recompensas y lo anuncia."""
-        new_xp = await asyncio.to_thread(add_xp, guild.id, member.id, amount)
-        old_level, new_level = level_for_xp(new_xp - amount), level_for_xp(new_xp)
+    async def award(self, guild: discord.Guild, member: discord.Member, amount: int):
+        """Suma experiencia y, si la persona sube de nivel, le da las recompensas y lo anuncia."""
+        group = cuentas.group_of(guild.id, member.id)
+        new_total = await asyncio.to_thread(add_xp, guild.id, member.id, amount, group)
+        old_level, new_level = level_for_xp(new_total - amount), level_for_xp(new_total)
         if new_level > old_level:
-            roles = await self.sync_rewards(member, new_level)
-            if announce:
-                await self.announce_level_up(guild, member, new_level, roles)
+            roles = await self.sync_person(guild, member.id, new_level)
+            await self.announce_level_up(guild, member, new_level, roles)
 
-    async def sync_rewards(self, member: discord.Member, level: int) -> List[discord.Role]:
-        """Da los roles de recompensa que le correspondan y aún no tenga (se acumulan, nunca se quitan)."""
-        guild = member.guild
+    async def sync_person(self, guild: discord.Guild, user_id: int, level: Optional[int] = None) -> List[discord.Role]:
+        """
+        Da los roles de recompensa que le correspondan a la persona en todas sus cuentas
+        (se acumulan, nunca se quitan). Devuelve los roles que se han dado ahora.
+        """
+        group = cuentas.group_of(guild.id, user_id)
+        if level is None:
+            level = level_for_xp(await asyncio.to_thread(person_xp, guild.id, group))
         wanted = [guild.get_role(role_id)
                   for nivel, role_ids in self.rewards.get(guild.id, {}).items() if nivel <= level
                   for role_id in role_ids]
-        missing = [role for role in wanted if role is not None and role not in member.roles]
-        if not missing:
-            return []
-        try:
-            await member.add_roles(*missing, reason=f"Recompensa por llegar al nivel {level}")
-            return missing
-        except discord.Forbidden:
-            logger.warning("Niveles: sin permiso para dar roles de recompensa. Dale al bot «Gestionar roles» "
-                           "y pon su rol por encima de los de recompensa.")
-        except discord.HTTPException as e:
-            logger.warning(f"Niveles: no pude dar roles a {member}: {e}")
-        return []
+        given: List[discord.Role] = []
+        for account_id in group:
+            member = guild.get_member(account_id)
+            missing = [role for role in wanted if role is not None and member is not None and role not in member.roles]
+            if not missing:
+                continue
+            try:
+                await member.add_roles(*missing, reason=f"Recompensa por llegar al nivel {level}")
+                given += [role for role in missing if role not in given]
+            except discord.Forbidden:
+                logger.warning("Niveles: sin permiso para dar roles de recompensa. Dale al bot «Gestionar roles» "
+                               "y pon su rol por encima de los de recompensa.")
+            except discord.HTTPException as e:
+                logger.warning(f"Niveles: no pude dar roles a {member}: {e}")
+        return given
+
+    async def on_linked(self, guild: discord.Guild, principal_id: int):
+        """Al vincular cuentas se suma su experiencia: puede tocarle alguna recompensa (sin aviso)."""
+        await self.sync_person(guild, principal_id)
 
     async def announce_level_up(self, guild: discord.Guild, member: discord.Member, level: int,
                                 roles: List[discord.Role]):
@@ -354,7 +403,8 @@ class NivelesCog(commands.Cog):
             return
         if message.author.bot or message.webhook_id or message.is_system():
             return
-        key = (message.guild.id, message.author.id)
+        # La espera es por persona: escribir con dos cuentas a la vez no da el doble
+        key = (message.guild.id, cuentas.principal_of(message.guild.id, message.author.id))
         now = time.monotonic()
         if now - self.cooldowns.get(key, float("-inf")) < MESSAGE_COOLDOWN:
             return
@@ -385,7 +435,9 @@ class NivelesCog(commands.Cog):
                         voice = member.voice
                         if voice is None or voice.self_deaf or voice.deaf:
                             continue  # Ensordecido no cuenta (silenciado sí)
-                        key = (guild.id, member.id)
+                        key = (guild.id, cuentas.principal_of(guild.id, member.id))
+                        if key in present:
+                            continue  # Otra cuenta de la misma persona ya ha contado este minuto
                         present.add(key)
                         minutes = self.voice_minutes.get(key, 0) + 1
                         if minutes >= VOICE_INTERVAL:
@@ -404,30 +456,38 @@ class NivelesCog(commands.Cog):
 
     # ---------- Comandos para todos ----------
 
-    def _ranked_members(self, guild: discord.Guild) -> List[Tuple[discord.Member, int]]:
-        """Clasificación con solo la gente que sigue en el servidor."""
-        rows = []
+    def _ranked_people(self, guild: discord.Guild) -> List[Tuple[discord.Member, int, int]]:
+        """Clasificación por persona: (cuenta que se muestra, experiencia total, nº de cuentas)."""
+        totals: Dict[int, int] = defaultdict(int)
         for user_id, xp in ranking_rows(guild.id):
-            member = guild.get_member(user_id)
-            if member is not None and not member.bot:
-                rows.append((member, xp))
-        return rows
+            totals[cuentas.principal_of(guild.id, user_id)] += xp
+        people = []
+        for principal, total in totals.items():
+            group = cuentas.group_of(guild.id, principal)
+            present = [m for m in map(guild.get_member, group) if m is not None and not m.bot]
+            if present and total > 0:
+                people.append((present[0], total, len(group)))
+        people.sort(key=lambda person: (-person[1], person[0].id))
+        return people
 
     @app_commands.command(name="nivel", description="Muestra el nivel y la experiencia de alguien")
     @app_commands.guild_only()
     @app_commands.describe(usuario="De quién ver el nivel (por defecto, el tuyo)")
     async def nivel(self, interaction: discord.Interaction, usuario: Optional[discord.Member] = None):
         member = usuario or interaction.user
-        if interaction.guild_id not in self.channels:
+        guild = interaction.guild
+        if guild.id not in self.channels:
             return await interaction.response.send_message(
                 "📈 Los niveles no están activados en este servidor (un admin puede hacerlo con `/setup-niveles`).",
                 ephemeral=True
             )
-        xp = get_xp(interaction.guild_id, member.id)
+        group = cuentas.group_of(guild.id, member.id)
+        xp = person_xp(guild.id, group)
         level = level_for_xp(xp)
         current, following = total_xp_for_level(level), total_xp_for_level(level + 1)
-        position = next((i for i, (m, _) in enumerate(self._ranked_members(interaction.guild), 1)
-                         if m.id == member.id), None)
+        person = cuentas.principal_of(guild.id, member.id)
+        position = next((i for i, (shown, _, _) in enumerate(self._ranked_people(guild), 1)
+                         if cuentas.principal_of(guild.id, shown.id) == person), None)
 
         embed = discord.Embed(title=f"📈 {member.display_name}", color=discord.Color.blurple())
         embed.set_thumbnail(url=member.display_avatar.url)
@@ -440,7 +500,9 @@ class NivelesCog(commands.Cog):
                   f"{_fmt(xp - current)} / {_fmt(following - current)}",
             inline=False
         )
-        await interaction.response.send_message(embed=embed)
+        if len(group) > 1:
+            embed.add_field(name="🔗 Cuentas vinculadas", value=" · ".join(f"<@{uid}>" for uid in group), inline=False)
+        await interaction.response.send_message(embed=embed, allowed_mentions=discord.AllowedMentions.none())
 
     @app_commands.command(name="ranking", description="Clasificación de niveles del servidor")
     @app_commands.guild_only()
@@ -450,13 +512,16 @@ class NivelesCog(commands.Cog):
             return await interaction.response.send_message(
                 "📈 Los niveles no están activados en este servidor.", ephemeral=True
             )
-        rows = self._ranked_members(interaction.guild)
-        pages = max(1, math.ceil(len(rows) / RANKING_PAGE_SIZE))
+        people = self._ranked_people(interaction.guild)
+        pages = max(1, math.ceil(len(people) / RANKING_PAGE_SIZE))
         pagina = min(pagina, pages)
         start = (pagina - 1) * RANKING_PAGE_SIZE
         medals = {1: "🥇", 2: "🥈", 3: "🥉"}
-        lines = [f"{medals.get(pos, f'`{pos}.`')} {member.mention} · nivel **{level_for_xp(xp)}** · {_fmt(xp)} exp"
-                 for pos, (member, xp) in enumerate(rows[start:start + RANKING_PAGE_SIZE], start + 1)]
+        lines = []
+        for pos, (member, xp, accounts) in enumerate(people[start:start + RANKING_PAGE_SIZE], start + 1):
+            linked = f" · 🔗 {accounts} cuentas" if accounts > 1 else ""
+            lines.append(f"{medals.get(pos, f'`{pos}.`')} {member.mention} · nivel **{level_for_xp(xp)}** · "
+                         f"{_fmt(xp)} exp{linked}")
         embed = discord.Embed(title="🏆 Ranking de niveles", description="\n".join(lines) or "Aún no hay nadie.",
                               color=discord.Color.gold())
         embed.set_footer(text=f"Página {pagina} de {pages}")
@@ -563,26 +628,22 @@ class NivelesCog(commands.Cog):
 
         # Quien ya tenga ese nivel lo recibe ahora, sin esperar a volver a subir
         await interaction.response.defer()
-        given = 0
-        for user_id, xp in await asyncio.to_thread(ranking_rows, guild.id):
+        people = set()
+        for shown, xp, _ in self._ranked_people(guild):
             if level_for_xp(xp) < nivel:
                 break  # Están ordenados de mayor a menor experiencia
-            member = guild.get_member(user_id)
-            if member is not None and rol not in member.roles:
-                try:
-                    await member.add_roles(rol, reason=f"Recompensa por tener el nivel {nivel}")
-                    given += 1
-                except discord.HTTPException as e:
-                    logger.warning(f"Niveles: no pude dar {rol.name} a {member}: {e}")
-        if given:
-            text += f"\n🏆 Se lo he dado ya a **{given}** {'persona' if given == 1 else 'personas'} con ese nivel."
+            if rol in await self.sync_person(guild, shown.id):
+                people.add(cuentas.principal_of(guild.id, shown.id))
+        if people:
+            text += f"\n🏆 Se lo he dado ya a **{len(people)}** {'persona' if len(people) == 1 else 'personas'} con ese nivel."
         await interaction.followup.send(text, allowed_mentions=discord.AllowedMentions.none())
 
     @app_commands.command(name="niveles-ajustar",
                           description="Pone a alguien una experiencia o un nivel exactos (solo admins)")
     @app_commands.guild_only()
     @app_commands.default_permissions(manage_guild=True)
-    @app_commands.describe(usuario="A quién", exp="Experiencia total exacta",
+    @app_commands.describe(usuario="A quién (si tiene cuentas vinculadas, es el total de la persona)",
+                           exp="Experiencia total exacta",
                            nivel="O bien un nivel: se pone la experiencia justa para tenerlo")
     async def ajustar(self, interaction: discord.Interaction, usuario: discord.Member,
                       exp: Optional[app_commands.Range[int, 0, 100_000_000]] = None,
@@ -593,8 +654,8 @@ class NivelesCog(commands.Cog):
             return await interaction.response.send_message("❌ Indica `exp` **o** `nivel` (uno de los dos).",
                                                            ephemeral=True)
         xp = exp if exp is not None else total_xp_for_level(nivel)
-        await asyncio.to_thread(set_xp, interaction.guild_id, usuario.id, xp)
-        await self.sync_rewards(usuario, level_for_xp(xp))
+        await asyncio.to_thread(set_person_xp, interaction.guild_id, cuentas.group_of(interaction.guild_id, usuario.id), xp)
+        await self.sync_person(interaction.guild, usuario.id, level_for_xp(xp))
         await interaction.response.send_message(
             f"✅ {usuario.mention} tiene ahora **{_fmt(xp)}** de experiencia (nivel **{level_for_xp(xp)}**).",
             allowed_mentions=discord.AllowedMentions.none()
@@ -619,19 +680,20 @@ class NivelesCog(commands.Cog):
                 "(«#1», nombre, experiencia y nivel) y guárdala en un .txt.", ephemeral=True
             )
         guild = interaction.guild
-        resolved, problems, unknown = match_members(guild.members, entries)
-        for user_id, xp in resolved.items():
-            await asyncio.to_thread(set_xp, guild.id, user_id, xp)
-            member = guild.get_member(user_id)
-            if member is not None:
-                await self.sync_rewards(member, level_for_xp(xp))
+        # Primero las cuentas de la misma persona, para que su experiencia se sume
+        links_report = cuentas.link_by_names(guild.id, guild.members, read_link_groups())
+        totals, problems, unknown = plan_import(guild.id, guild.members, entries)
+        for principal, xp in totals.items():
+            await asyncio.to_thread(set_person_xp, guild.id, cuentas.group_of(guild.id, principal), xp)
+            await self.sync_person(guild, principal, level_for_xp(xp))
 
-        summary = (f"✅ **{len(resolved)}** personas importadas con su experiencia exacta de Amari.\n"
+        summary = (f"✅ **{len(totals)}** personas importadas con su experiencia exacta de Amari.\n"
                    f"👻 {unknown} «Unknown» saltados (ya no están en el servidor).")
+        if links_report:
+            summary += "\n\n**Cuentas vinculadas:**\n" + _clip_lines("\n".join(links_report), 500)
         if problems:
-            listing = "\n".join(f"• {p}" for p in problems)
-            if len(listing) > 1500:
-                listing = listing[:1500].rsplit("\n", 1)[0] + "\n• …"
             summary += (f"\n\n⚠️ **{len(problems)} sin resolver**: ajústalos con "
-                        f"`/niveles-ajustar usuario:@persona exp:N`\n{listing}")
+                        f"`/niveles-ajustar usuario:@persona exp:N` o vincula sus cuentas y vuelve a importar.\n")
+            # Lo que quepa: Discord no admite mensajes de más de 2000 caracteres
+            summary += _clip_lines("\n".join(f"• {p}" for p in problems), MAX_MESSAGE_LENGTH - len(summary))
         await interaction.followup.send(summary, ephemeral=True)

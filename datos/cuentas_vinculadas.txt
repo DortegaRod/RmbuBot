@@ -1,0 +1,11 @@
+# Cuentas de la misma persona en la clasificación de Amari. Se vinculan al importarla con /niveles-importar.
+# Una persona por línea, con los nombres tal como salen en Amari separados por « | ».
+# Un nombre que tengan varias cuentas (p. ej. dos «Alvort») las vincula todas.
+# La cuenta principal es la más antigua de las que se llamen como el primer nombre.
+Alvort | AlvortMobile
+Minisaba_
+mochuelamen | Mochu
+LeMineboss | LeͤMⷨiͥneͤвⷡoͦs͛s͛
+JosedaLoC | josedalc
+chistro | sanchistro
+Rodrigo Sainz | Rod-13

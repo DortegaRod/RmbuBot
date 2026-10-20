@@ -26,6 +26,7 @@ from music import (
 )
 from radios import RADIOS, RADIOS_BY_KEY, RADIO_ICON, fetch_now_playing
 from palabra import PalabraCog
+from cuentas import CuentasCog
 from niveles import NivelesCog
 
 # --- INICIALIZACIÓN ---
@@ -58,6 +59,8 @@ class MusicBot(commands.Bot):
         self.add_view(controls.NowPlayingView())
         # Juego diario: /palabra, /palabra-stats, /setup-palabra y el anuncio de cada día
         await self.add_cog(PalabraCog(self))
+        # Cuentas vinculadas (varias cuentas de una misma persona); los niveles las usan
+        await self.add_cog(CuentasCog(self))
         # Niveles: experiencia por mensajes y voz, avisos y roles de recompensa
         await self.add_cog(NivelesCog(self))
         # Sincroniza los comandos de barra (Slash Commands) con Discord al iniciar
@@ -767,6 +770,8 @@ async def help_cmd(interaction: discord.Interaction):
         value=(
             "`/nivel [usuario]` — Nivel, experiencia y puesto\n"
             "`/ranking [página]` — Clasificación del servidor\n"
+            "`/vincular <cuenta>` — Une otra cuenta tuya: se suma su experiencia\n"
+            "`/desvincular [cuenta]` — Separa una cuenta vinculada\n"
             "*Se gana experiencia escribiendo y estando en voz.*"
         ),
         inline=False
@@ -778,6 +783,7 @@ async def help_cmd(interaction: discord.Interaction):
             "`/setup-palabra <canal> [hora] [rol]` — Canal, hora y rol al que avisar del anuncio diario de la palabra\n"
             "`/setup-niveles <canal>` — Activa los niveles y elige dónde se anuncian\n"
             "`/niveles-recompensa` · `/niveles-multiplicador` · `/niveles-importar` · `/niveles-ajustar`\n"
+            "`/vincular-cuentas` — Vincula cuentas de una persona sin pedirle confirmación\n"
             "*(requieren Gestionar servidor)*"
         ),
         inline=False
