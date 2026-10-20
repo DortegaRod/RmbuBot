@@ -3,7 +3,8 @@ Palabra del día: el Wordle en español del server.
 
 - Una palabra de 5 letras al día, la misma en todos los servidores; cambia a medianoche (hora de España).
 - Cada persona juega en privado con /palabra: 6 intentos, las tildes no cuentan (la ñ sí).
-- Al terminar, el bot publica sus cuadritos (sin letras) en el canal del juego.
+- Al terminar, el bot publica sus cuadritos (sin letras) en el canal del juego. La primera fila
+  va tapada: casi todos abren con la misma palabra y sus colores serían un intento gratis.
 - A la hora configurada con /setup-palabra, el bot anuncia la nueva palabra con un botón «Jugar» (mencionando al rol
   elegido, si hay uno) y revela la de ayer.
 
@@ -42,6 +43,7 @@ DEFAULT_HOUR = 10
 DATA_DIR = Path(__file__).parent / "datos"
 
 GREEN, YELLOW, GRAY, EMPTY = "🟩", "🟨", "⬛", "⬜"
+HIDDEN = "❔"  # Primera fila de los resultados publicados
 NO_MENTIONS = discord.AllowedMentions.none()
 
 VALID_WORDS: set = set()  # Palabras aceptadas como intento (normalizadas: sin tildes)
@@ -309,8 +311,13 @@ def compute_stats(results: Dict[date, Tuple[bool, int]], day: date) -> Stats:
 # MENSAJES
 # ==========================================
 
-def _grid(game: Game, answer: str) -> str:
-    return "\n".join("".join(score(guess, answer)) for guess in game.guesses)
+def _public_grid(game: Game, answer: str) -> str:
+    """
+    Cuadritos que se publican, con la primera fila tapada: casi todos abren con la misma palabra,
+    y ver sus colores le daría a quien aún no ha jugado un intento gratis.
+    """
+    rows = [HIDDEN * WORD_LENGTH] + ["".join(score(guess, answer)) for guess in game.guesses[1:]]
+    return "\n".join(rows)
 
 
 def _next_word_at() -> int:
@@ -367,7 +374,8 @@ def board_card(numero: int, answer_display: str, game: Game, fecha: str, notice:
     card.text(status)
 
     if game.finished:
-        notes = [f"Tu resultado se ha publicado en {published_in}."] if published_in else []
+        notes = ([f"Tu resultado se ha publicado en {published_in}, con la primera fila tapada para no dar pistas."]
+                 if published_in else [])
         notes.append(f"⏳ Nueva palabra <t:{_next_word_at()}:R>")
         card.note("\n".join(notes))
     else:
@@ -461,7 +469,7 @@ async def _publish_result(interaction: discord.Interaction, channel, numero: int
     if streak >= 2:
         head += f"  🔥 racha {streak}"
     try:
-        await channel.send(f"{head}\n{_grid(game, answer)}", allowed_mentions=NO_MENTIONS)
+        await channel.send(f"{head}\n{_public_grid(game, answer)}", allowed_mentions=NO_MENTIONS)
     except discord.HTTPException as e:
         logger.warning(f"No pude publicar el resultado de la palabra del día: {e}")
 
