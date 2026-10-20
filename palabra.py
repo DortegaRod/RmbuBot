@@ -4,7 +4,7 @@ Palabra del día: el Wordle en español del server.
 - Una palabra de 5 letras al día, la misma en todos los servidores; cambia a medianoche (hora de España).
 - Cada persona juega en privado con /palabra: 6 intentos, las tildes no cuentan (la ñ sí).
 - Al terminar, el bot publica sus cuadritos (sin letras) en el canal del juego.
-- A la hora configurada con /setup-palabra, el bot anuncia la nueva palabra (mencionando al rol
+- A la hora configurada con /setup-palabra, el bot anuncia la nueva palabra con un botón «Jugar» (mencionando al rol
   elegido, si hay uno) y revela la de ayer.
 
 Diccionario: lista de palabras de Letterpress (github.com/lorenbrichter/Words, dominio público CC0).
@@ -26,6 +26,7 @@ from discord.ext import commands, tasks
 from discord.utils import escape_markdown
 
 import db
+import tarjetas
 
 logger = logging.getLogger(__name__)
 
@@ -312,11 +313,11 @@ def _grid(game: Game, answer: str) -> str:
     return "\n".join("".join(score(guess, answer)) for guess in game.guesses)
 
 
-def _time_to_next_word() -> str:
+def _next_word_at() -> int:
+    """Cuándo sale la palabra siguiente (medianoche en España), como marca de tiempo para Discord."""
     now = datetime.now(SPAIN_TZ)
     midnight = datetime.combine(now.date() + timedelta(days=1), time(0), tzinfo=SPAIN_TZ)
-    minutes = int((midnight - now).total_seconds() // 60)
-    return f"{minutes // 60} h {minutes % 60} min"
+    return int(midnight.timestamp())
 
 
 def _letters_summary(guesses: List[str], answer: str) -> str:
@@ -337,22 +338,24 @@ def _letters_summary(guesses: List[str], answer: str) -> str:
     return "\n".join(lines)
 
 
-def board_embed(numero: int, answer_display: str, game: Game, notice: Optional[str] = None,
-                published_in: Optional[str] = None) -> discord.Embed:
-    """Tablero privado de quien juega."""
+def board_card(numero: int, answer_display: str, game: Game, fecha: str, notice: Optional[str] = None,
+               published_in: Optional[str] = None) -> tarjetas.Card:
+    """Tablero privado de quien juega, con el botón para escribir la siguiente palabra."""
     answer = normalize(answer_display)
     rows = [f"{''.join(score(guess, answer))}  `{' '.join(guess.upper())}`" for guess in game.guesses]
     if not game.finished:
         rows += [EMPTY * WORD_LENGTH] * (MAX_ATTEMPTS - len(game.guesses))
 
-    parts = []
+    colour = discord.Colour.green() if game.won else discord.Colour.red() if game.finished else tarjetas.INFO
+    card = tarjetas.Card(colour)
+    card.text(f"## 🟩 Palabra del día #{numero}")
     if notice:
-        parts.append(f"⚠️ {notice}")
+        card.text(f"⚠️ {notice}")
     if not game.guesses:
-        parts.append(f"Adivina la palabra de **{WORD_LENGTH} letras** en **{MAX_ATTEMPTS} intentos**.\n"
-                     f"{GREEN} en su sitio · {YELLOW} está en otro sitio · {GRAY} no está\n"
-                     f"Las tildes no cuentan (la Ñ sí).")
-    parts.append("\n".join(rows))
+        card.text(f"Adivina la palabra de **{WORD_LENGTH} letras** en **{MAX_ATTEMPTS} intentos**.\n"
+                  f"{GREEN} en su sitio · {YELLOW} está en otro sitio · {GRAY} no está")
+        card.note("Las tildes no cuentan (la Ñ sí).")
+    card.text("\n".join(rows))
 
     if game.won:
         status = f"🎉 **¡Acertaste en {len(game.guesses)}/{MAX_ATTEMPTS}!**"
@@ -360,52 +363,55 @@ def board_embed(numero: int, answer_display: str, game: Game, notice: Optional[s
         status = f"💀 Se acabaron los intentos. La palabra era **{answer_display.upper()}**."
     else:
         left = MAX_ATTEMPTS - len(game.guesses)
-        status = f"Te queda **1** intento." if left == 1 else f"Te quedan **{left}** intentos."
+        status = "Te queda **1** intento." if left == 1 else f"Te quedan **{left}** intentos."
+    card.text(status)
+
     if game.finished:
-        if published_in:
-            status += f"\nTu resultado se ha publicado en {published_in}."
-        status += f"\n⏳ Nueva palabra en {_time_to_next_word()}."
-    parts.append(status)
+        notes = [f"Tu resultado se ha publicado en {published_in}."] if published_in else []
+        notes.append(f"⏳ Nueva palabra <t:{_next_word_at()}:R>")
+        card.note("\n".join(notes))
+    else:
+        letters = _letters_summary(game.guesses, answer)
+        if letters:
+            card.separator()
+            card.text(letters)
+        card.buttons(GuessButton(fecha))
+    return card
 
-    color = discord.Color.green() if game.won else discord.Color.red() if game.finished else discord.Color.blurple()
-    embed = discord.Embed(title=f"🟩 Palabra del día #{numero}", description="\n\n".join(parts), color=color)
-    letters = _letters_summary(game.guesses, answer)
-    if letters and not game.finished:
-        embed.add_field(name="Letras", value=letters, inline=False)
-    return embed
 
-
-def stats_embed(member: discord.abc.User, stats: Stats) -> discord.Embed:
-    embed = discord.Embed(title=f"📊 Palabra del día · {member.display_name}", color=discord.Color.green())
-    embed.set_thumbnail(url=member.display_avatar.url)
-    embed.add_field(name="Jugadas", value=str(stats.played))
-    embed.add_field(name="Aciertos", value=f"{round(100 * stats.wins / stats.played)} %" if stats.played else "—")
-    embed.add_field(name="Racha", value=f"🔥 {stats.current_streak} · mejor: {stats.best_streak}")
+def stats_card(member: discord.abc.User, stats: Stats) -> tarjetas.Card:
+    win_rate = f"{round(100 * stats.wins / stats.played)} %" if stats.played else "—"
+    card = tarjetas.Card(tarjetas.WORDLE)
+    card.section(f"## 📊 {escape_markdown(member.display_name)}\n"
+                 f"**{stats.played}** jugadas · **{win_rate}** de aciertos\n"
+                 f"🔥 Racha de **{stats.current_streak}** · la mejor, **{stats.best_streak}**",
+                 member.display_avatar.url, f"Avatar de {member.display_name}")
+    card.separator()
     peak = max(stats.distribution.values(), default=0)
     bars = []
     for attempts in range(1, MAX_ATTEMPTS + 1):
         count = stats.distribution.get(attempts, 0)
         bar = "█" * max(1 if count else 0, round(12 * count / peak) if peak else 0)
         bars.append(f"`{attempts}` {bar} {count}")
-    embed.add_field(name="Aciertos por número de intentos", value="\n".join(bars), inline=False)
-    return embed
+    card.text("**Aciertos por número de intentos**\n" + "\n".join(bars))
+    return card
 
 
-def announcement_embed(guild: discord.Guild, day: date) -> discord.Embed:
-    """Anuncio diario: la palabra nueva y los resultados de la de ayer en este servidor."""
+def announcement_card(guild: discord.Guild, day: date, role: Optional[discord.Role] = None) -> tarjetas.Card:
+    """Anuncio diario: la palabra nueva, los resultados de la de ayer en este servidor y el botón para jugar."""
     numero, _ = get_word(day)
-    embed = discord.Embed(
-        title=f"🟩 Palabra del día #{numero}",
-        description="¡Nueva palabra! Juega con **/palabra** (tus letras solo las ves tú).",
-        color=discord.Color.green()
-    )
+    card = tarjetas.Card(tarjetas.WORDLE)
+    # La mención va dentro de la tarjeta: avisa igual que en un mensaje normal
+    mention = f"{role.mention}\n" if role else ""
+    card.text(f"{mention}## 🟩 Palabra del día #{numero}\n"
+              f"¡Nueva palabra! Pulsa **Jugar** o usa {tarjetas.cmd('palabra')}: tus letras solo las ves tú.")
     yesterday = day - timedelta(days=1)
     previous = find_word(yesterday)
     if previous:
         prev_numero, prev_word = previous
         games = finished_games_on(yesterday, guild.id)
         winners = [g for g in games if g.won]
-        lines = [f"Era **{prev_word.upper()}**"]
+        lines = [f"### Ayer (#{prev_numero})", f"Era **{prev_word.upper()}**"]
         if games:
             lines.append(f"👥 {len(games)} {'jugó' if len(games) == 1 else 'jugaron'} · "
                          f"✅ {len(winners)} la {'sacó' if len(winners) == 1 else 'sacaron'}")
@@ -414,9 +420,11 @@ def announcement_embed(guild: discord.Guild, day: date) -> discord.Embed:
                 lines.append(" · ".join(podium))
         else:
             lines.append("Nadie la jugó 😢")
-        embed.add_field(name=f"Ayer (#{prev_numero})", value="\n".join(lines), inline=False)
-    embed.set_footer(text="Nueva palabra cada día a medianoche (hora de España)")
-    return embed
+        card.separator()
+        card.text("\n".join(lines))
+    card.note("Nueva palabra cada día a medianoche (hora de España)")
+    card.buttons(PlayButton())
+    return card
 
 
 # ==========================================
@@ -458,12 +466,18 @@ async def _publish_result(interaction: discord.Interaction, channel, numero: int
         logger.warning(f"No pude publicar el resultado de la palabra del día: {e}")
 
 
-def board_view(fecha: str, finished: bool) -> Optional[discord.ui.View]:
-    if finished:
-        return None
-    view = discord.ui.View(timeout=None)
-    view.add_item(GuessButton(fecha))
-    return view
+async def open_board(interaction: discord.Interaction):
+    """Abre el tablero de hoy de quien lo pide, solo para esa persona (/palabra y botón «Jugar»)."""
+    if not ANSWERS:
+        return await interaction.response.send_message(
+            "⚠️ La palabra del día no está disponible: faltan las listas de palabras (carpeta datos/).",
+            ephemeral=True
+        )
+    day = today()
+    numero, answer_display = get_word(day)
+    game = load_game(day, interaction.user.id)
+    await interaction.response.send_message(view=board_card(numero, answer_display, game, day.isoformat()),
+                                            ephemeral=True, allowed_mentions=NO_MENTIONS)
 
 
 async def submit_guess(interaction: discord.Interaction, fecha: str, raw: str):
@@ -471,7 +485,8 @@ async def submit_guess(interaction: discord.Interaction, fecha: str, raw: str):
     day = today()
     if fecha != day.isoformat():
         return await interaction.response.send_message(
-            "⏰ Ha cambiado el día mientras jugabas. Usa **/palabra** para la palabra nueva.", ephemeral=True
+            f"⏰ Ha cambiado el día mientras jugabas. Usa {tarjetas.cmd('palabra')} para la palabra nueva.",
+            ephemeral=True
         )
 
     async with _locks.setdefault(interaction.user.id, asyncio.Lock()):
@@ -499,9 +514,8 @@ async def submit_guess(interaction: discord.Interaction, fecha: str, raw: str):
                 save_game(game)
 
         channel = _results_channel(interaction) if just_finished else None
-        await interaction.response.edit_message(
-            embed=board_embed(numero, answer_display, game, notice, channel.mention if channel else None),
-            view=board_view(fecha, game.finished)
+        await tarjetas.update(
+            interaction, board_card(numero, answer_display, game, fecha, notice, channel.mention if channel else None)
         )
         if channel is not None:
             await _publish_result(interaction, channel, numero, answer, game)
@@ -537,16 +551,34 @@ class GuessButton(discord.ui.DynamicItem[discord.ui.Button], template=r"reimbou:
         return cls(match["fecha"])
 
     async def callback(self, interaction: discord.Interaction):
+        await tarjetas.run_safely(interaction, self._open_modal)
+
+    async def _open_modal(self, interaction: discord.Interaction):
         day = today()
         if self.fecha != day.isoformat():
             return await interaction.response.send_message(
-                "⏰ Esa palabra ya no está en juego. Usa **/palabra** para la de hoy.", ephemeral=True
+                f"⏰ Esa palabra ya no está en juego. Usa {tarjetas.cmd('palabra')} para la de hoy.", ephemeral=True
             )
         game = load_game(day, interaction.user.id)
         if game.finished:
             numero, answer_display = get_word(day)
-            return await interaction.response.edit_message(embed=board_embed(numero, answer_display, game), view=None)
+            return await tarjetas.update(interaction, board_card(numero, answer_display, game, self.fecha))
         await interaction.response.send_modal(GuessModal(self.fecha))
+
+
+class PlayButton(discord.ui.DynamicItem[discord.ui.Button], template=r"reimbou:palabra:jugar"):
+    """Botón «Jugar» del anuncio diario: abre el tablero de hoy de quien lo pulsa (como /palabra)."""
+
+    def __init__(self):
+        super().__init__(discord.ui.Button(label="Jugar", emoji="🟩", style=discord.ButtonStyle.success,
+                                           custom_id="reimbou:palabra:jugar"))
+
+    @classmethod
+    async def from_custom_id(cls, interaction: discord.Interaction, item: discord.ui.Button, match: re.Match):
+        return cls()
+
+    async def callback(self, interaction: discord.Interaction):
+        await tarjetas.run_safely(interaction, open_board)
 
 
 # ==========================================
@@ -562,7 +594,7 @@ class PalabraCog(commands.Cog):
     async def cog_load(self):
         init_db()
         load_words()
-        self.bot.add_dynamic_items(GuessButton)
+        self.bot.add_dynamic_items(GuessButton, PlayButton)
         self.announcer.start()
 
     async def cog_unload(self):
@@ -571,17 +603,7 @@ class PalabraCog(commands.Cog):
     @app_commands.command(name="palabra", description="Juega a la palabra del día (Wordle en español)")
     @app_commands.guild_only()
     async def palabra(self, interaction: discord.Interaction):
-        if not ANSWERS:
-            return await interaction.response.send_message(
-                "⚠️ La palabra del día no está disponible: faltan las listas de palabras (carpeta datos/).",
-                ephemeral=True
-            )
-        day = today()
-        numero, answer_display = get_word(day)
-        game = load_game(day, interaction.user.id)
-        view = board_view(day.isoformat(), game.finished)
-        await interaction.response.send_message(embed=board_embed(numero, answer_display, game), ephemeral=True,
-                                                **({"view": view} if view else {}))
+        await open_board(interaction)
 
     @app_commands.command(name="palabra-stats", description="Estadísticas y rachas de la palabra del día")
     @app_commands.guild_only()
@@ -592,9 +614,9 @@ class PalabraCog(commands.Cog):
         if stats.played == 0:
             who = "Aún no has" if member == interaction.user else f"{member.display_name} aún no ha"
             return await interaction.response.send_message(
-                f"📊 {who} terminado ninguna palabra del día. ¡Prueba con **/palabra**!", ephemeral=True
+                f"📊 {who} terminado ninguna palabra del día. ¡Prueba con {tarjetas.cmd('palabra')}!", ephemeral=True
             )
-        await interaction.response.send_message(embed=stats_embed(member, stats))
+        await interaction.response.send_message(view=stats_card(member, stats), allowed_mentions=NO_MENTIONS)
 
     @app_commands.command(name="setup-palabra", description="Canal, hora y rol del anuncio diario de la palabra (solo admins)")
     @app_commands.guild_only()
@@ -629,14 +651,13 @@ class PalabraCog(commands.Cog):
         if canal is None and hora is None and rol is None and not quitar_rol:
             if config:
                 aviso = f", avisando a <@&{config.role_id}>" if config.role_id else ", sin avisar a ningún rol"
-                status = f"📌 La palabra del día se anuncia a las **{config.hora:02d}:00** en <#{config.channel_id}>{aviso}."
+                status = f"Se anuncia a las **{config.hora:02d}:00** en <#{config.channel_id}>{aviso}."
             else:
-                status = "📌 No hay anuncio diario configurado."
-            return await interaction.response.send_message(
-                f"{status}\nUsa `/setup-palabra canal:#canal hora:10 rol:@rol` para cambiarlo, "
-                f"`quitar_rol:True` para no avisar a nadie o `quitar:True` para desactivarlo.",
-                ephemeral=True, allowed_mentions=NO_MENTIONS
-            )
+                status = "No hay anuncio diario configurado."
+            card = tarjetas.Card(tarjetas.WORDLE).text(f"### ⚙️ Palabra del día\n{status}")
+            card.note("Cámbialo con /setup-palabra canal:#canal hora:10 rol:@rol · quitar_rol:True para no avisar "
+                      "a nadie · quitar:True para desactivarlo.")
+            return await interaction.response.send_message(view=card, ephemeral=True, allowed_mentions=NO_MENTIONS)
 
         channel = canal or (interaction.guild.get_channel(config.channel_id) if config else None)
         if channel is None:
@@ -694,10 +715,8 @@ class PalabraCog(commands.Cog):
                 if config.role_id and role is None:
                     logger.warning(f"Palabra del día: el rol {config.role_id} ya no existe en el servidor {config.guild_id}")
                 try:
-                    # La mención va en el texto del mensaje: dentro de un embed no avisaría a nadie
                     await channel.send(
-                        content=role.mention if role else None,
-                        embed=announcement_embed(guild, now.date()),
+                        view=announcement_card(guild, now.date(), role),
                         allowed_mentions=(discord.AllowedMentions(everyone=False, users=False, roles=[role])
                                           if role else NO_MENTIONS),
                     )

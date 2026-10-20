@@ -29,6 +29,7 @@ from discord.utils import escape_markdown
 
 import cuentas
 import db
+import tarjetas
 
 logger = logging.getLogger(__name__)
 
@@ -42,7 +43,6 @@ GLOBAL_MULTIPLIER = 1
 
 RANKING_PAGE_SIZE = 10
 MAX_IMPORT_BYTES = 1_000_000
-MAX_MESSAGE_LENGTH = 2000  # Límite de Discord por mensaje
 LINKS_FILE = Path(__file__).parent / "datos" / "cuentas_vinculadas.txt"
 
 
@@ -332,6 +332,7 @@ class NivelesCog(commands.Cog):
         init_db()
         self.reload_settings()
         cuentas.on_linked = self.on_linked
+        tarjetas.register_pages("ranking", self._render_ranking)  # Flechas y «Mi puesto» del /ranking
         self.voice_xp.start()
 
     async def cog_unload(self):
@@ -470,39 +471,79 @@ class NivelesCog(commands.Cog):
         people.sort(key=lambda person: (-person[1], person[0].id))
         return people
 
-    @app_commands.command(name="nivel", description="Muestra el nivel y la experiencia de alguien")
-    @app_commands.guild_only()
-    @app_commands.describe(usuario="De quién ver el nivel (por defecto, el tuyo)")
-    async def nivel(self, interaction: discord.Interaction, usuario: Optional[discord.Member] = None):
-        member = usuario or interaction.user
-        guild = interaction.guild
-        if guild.id not in self.channels:
-            return await interaction.response.send_message(
-                "📈 Los niveles no están activados en este servidor (un admin puede hacerlo con `/setup-niveles`).",
-                ephemeral=True
-            )
+    def _position_of(self, people: List[Tuple[discord.Member, int, int]], guild_id: int, user_id: int) -> Optional[int]:
+        """Puesto (desde 0) de la persona a la que pertenece `user_id`, o None si no está en el ranking."""
+        person = cuentas.principal_of(guild_id, user_id)
+        return next((i for i, (shown, _, _) in enumerate(people) if cuentas.principal_of(guild_id, shown.id) == person),
+                    None)
+
+    def nivel_card(self, guild: discord.Guild, member: discord.Member) -> tarjetas.Card:
         group = cuentas.group_of(guild.id, member.id)
         xp = person_xp(guild.id, group)
         level = level_for_xp(xp)
         current, following = total_xp_for_level(level), total_xp_for_level(level + 1)
-        person = cuentas.principal_of(guild.id, member.id)
-        position = next((i for i, (shown, _, _) in enumerate(self._ranked_people(guild), 1)
-                         if cuentas.principal_of(guild.id, shown.id) == person), None)
+        index = self._position_of(self._ranked_people(guild), guild.id, member.id)
+        position = f" · puesto **#{index + 1}**" if index is not None else ""
 
-        embed = discord.Embed(title=f"📈 {member.display_name}", color=discord.Color.blurple())
-        embed.set_thumbnail(url=member.display_avatar.url)
-        embed.add_field(name="Nivel", value=f"**{level}**")
-        embed.add_field(name="Puesto", value=f"**#{position}**" if position else "—")
-        embed.add_field(name="Experiencia", value=_fmt(xp))
-        embed.add_field(
-            name=f"Hasta el nivel {level + 1}",
-            value=f"`{_progress_bar((xp - current) / (following - current))}` "
-                  f"{_fmt(xp - current)} / {_fmt(following - current)}",
-            inline=False
-        )
+        card = tarjetas.Card(tarjetas.LEVELS)
+        card.section(f"## 📈 {escape_markdown(member.display_name)}\n**Nivel {level}**{position}\n"
+                     f"{_fmt(xp)} de experiencia", member.display_avatar.url, f"Avatar de {member.display_name}")
+        card.text(f"`{_progress_bar((xp - current) / (following - current))}` "
+                  f"{_fmt(xp - current)} / {_fmt(following - current)} para el nivel {level + 1}")
         if len(group) > 1:
-            embed.add_field(name="🔗 Cuentas vinculadas", value=" · ".join(f"<@{uid}>" for uid in group), inline=False)
-        await interaction.response.send_message(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+            card.note("🔗 Cuentas vinculadas: " + " · ".join(f"<@{uid}>" for uid in group))
+        return card
+
+    @app_commands.command(name="nivel", description="Muestra el nivel y la experiencia de alguien")
+    @app_commands.guild_only()
+    @app_commands.describe(usuario="De quién ver el nivel (por defecto, el tuyo)")
+    async def nivel(self, interaction: discord.Interaction, usuario: Optional[discord.Member] = None):
+        if interaction.guild_id not in self.channels:
+            return await interaction.response.send_message(
+                f"📈 Los niveles no están activados en este servidor (un admin puede hacerlo con "
+                f"{tarjetas.cmd('setup-niveles')}).", ephemeral=True
+            )
+        card = self.nivel_card(interaction.guild, usuario or interaction.user)
+        await interaction.response.send_message(view=card, allowed_mentions=discord.AllowedMentions.none())
+
+    def ranking_card(self, guild: discord.Guild, owner_id: int, page: Union[int, str]) -> Union[tarjetas.Card, str]:
+        """
+        Una página del ranking. `owner_id` es quien la ve (su fila lleva 👈); `page` puede ser «yo»:
+        la página donde está esa persona.
+        """
+        people = self._ranked_people(guild)
+        pages = max(1, math.ceil(len(people) / RANKING_PAGE_SIZE))
+        mine = self._position_of(people, guild.id, owner_id)
+        if page == "yo":
+            if mine is None:
+                return "📍 Aún no apareces en el ranking: escribe o entra en un canal de voz para ganar experiencia."
+            page = mine // RANKING_PAGE_SIZE + 1
+        page = tarjetas.clamp_page(page, pages)
+        start = (page - 1) * RANKING_PAGE_SIZE
+
+        medals = {1: "🥇", 2: "🥈", 3: "🥉"}
+        lines = []
+        for pos, (member, xp, accounts) in enumerate(people[start:start + RANKING_PAGE_SIZE], start + 1):
+            linked = f" · 🔗 {accounts} cuentas" if accounts > 1 else ""
+            you = " 👈" if pos - 1 == mine else ""
+            lines.append(f"{medals.get(pos, f'`{pos}.`')} {member.mention} · nivel **{level_for_xp(xp)}** · "
+                         f"{_fmt(xp)} exp{linked}{you}")
+
+        card = tarjetas.Card(tarjetas.RANKING)
+        card.text("## 🏆 Ranking de niveles")
+        card.text("\n".join(lines) or "Aún no hay nadie.")
+        if people:
+            card.separator()
+            count = f"{len(people)} {'persona' if len(people) == 1 else 'personas'}"
+            card.note(f"Página {page} de {pages} · {count}" if pages > 1 else count)
+        extra = [tarjetas.PageButton("ranking", owner_id, "yo", emoji="📍", label="Mi puesto")] if pages > 1 else []
+        card.buttons(*tarjetas.page_controls("ranking", owner_id, page, pages, *extra))
+        return card
+
+    async def _render_ranking(self, interaction: discord.Interaction, owner_id: int, page: Union[int, str]):
+        if interaction.guild_id not in self.channels:
+            return "📈 Los niveles no están activados en este servidor."
+        return self.ranking_card(interaction.guild, owner_id, page)
 
     @app_commands.command(name="ranking", description="Clasificación de niveles del servidor")
     @app_commands.guild_only()
@@ -512,20 +553,8 @@ class NivelesCog(commands.Cog):
             return await interaction.response.send_message(
                 "📈 Los niveles no están activados en este servidor.", ephemeral=True
             )
-        people = self._ranked_people(interaction.guild)
-        pages = max(1, math.ceil(len(people) / RANKING_PAGE_SIZE))
-        pagina = min(pagina, pages)
-        start = (pagina - 1) * RANKING_PAGE_SIZE
-        medals = {1: "🥇", 2: "🥈", 3: "🥉"}
-        lines = []
-        for pos, (member, xp, accounts) in enumerate(people[start:start + RANKING_PAGE_SIZE], start + 1):
-            linked = f" · 🔗 {accounts} cuentas" if accounts > 1 else ""
-            lines.append(f"{medals.get(pos, f'`{pos}.`')} {member.mention} · nivel **{level_for_xp(xp)}** · "
-                         f"{_fmt(xp)} exp{linked}")
-        embed = discord.Embed(title="🏆 Ranking de niveles", description="\n".join(lines) or "Aún no hay nadie.",
-                              color=discord.Color.gold())
-        embed.set_footer(text=f"Página {pagina} de {pages}")
-        await interaction.response.send_message(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+        card = self.ranking_card(interaction.guild, interaction.user.id, pagina)
+        await interaction.response.send_message(view=card, allowed_mentions=discord.AllowedMentions.none())
 
     # ---------- Comandos de admins ----------
 
@@ -547,7 +576,7 @@ class NivelesCog(commands.Cog):
                 "✅ Niveles desactivados: ya no se cuenta experiencia. La que había se conserva."
             )
         if canal is None:
-            return await interaction.response.send_message(embed=self._settings_embed(guild), ephemeral=True,
+            return await interaction.response.send_message(view=self._settings_card(guild), ephemeral=True,
                                                            allowed_mentions=discord.AllowedMentions.none())
         perms = canal.permissions_for(guild.me)
         if not (perms.view_channel and perms.send_messages):
@@ -562,23 +591,23 @@ class NivelesCog(commands.Cog):
             text += "\n⚠️ Para dar los roles de recompensa, el bot necesita el permiso **Gestionar roles**."
         await interaction.response.send_message(text)
 
-    def _settings_embed(self, guild: discord.Guild) -> discord.Embed:
+    def _settings_card(self, guild: discord.Guild) -> tarjetas.Card:
         channel_id = self.channels.get(guild.id)
-        embed = discord.Embed(title="📈 Configuración de niveles", color=discord.Color.blurple())
-        embed.add_field(name="Estado", value=f"Activo · avisos en <#{channel_id}>" if channel_id
-                        else "Desactivado (`/setup-niveles canal:#canal`)", inline=False)
-        embed.add_field(name="Experiencia",
-                        value=f"{MESSAGE_XP} por mensaje (uno cada {MESSAGE_COOLDOWN} s)\n"
-                              f"{VOICE_RATE * VOICE_INTERVAL} cada {VOICE_INTERVAL} min en voz "
-                              f"(no cuenta ensordecido ni el canal AFK)", inline=False)
+        state = (f"✅ Activos · las subidas se anuncian en <#{channel_id}>" if channel_id
+                 else f"⛔ Desactivados · actívalos con {tarjetas.cmd('setup-niveles')} y un canal")
         multipliers = self.multipliers.get(guild.id, {})
-        embed.add_field(name="Multiplicadores",
-                        value="\n".join(f"<#{c}> ×{v}" for c, v in multipliers.items()) or "Ninguno", inline=False)
         rewards = self.rewards.get(guild.id, {})
-        embed.add_field(name="Recompensas (se acumulan)",
-                        value="\n".join(f"Nivel {n}: " + ", ".join(f"<@&{r}>" for r in roles)
-                                        for n, roles in sorted(rewards.items()) if roles) or "Ninguna", inline=False)
-        return embed
+        card = tarjetas.Card(tarjetas.LEVELS)
+        card.text(f"## ⚙️ Configuración de niveles\n{state}")
+        card.text(f"**Experiencia:** {MESSAGE_XP} por mensaje (uno cada {MESSAGE_COOLDOWN} s) · "
+                  f"{VOICE_RATE * VOICE_INTERVAL} cada {VOICE_INTERVAL} min en voz")
+        card.note("En voz no cuenta estar ensordecido ni el canal AFK.")
+        card.separator()
+        card.text("**Multiplicadores**\n" + ("\n".join(f"<#{c}> ×{v}" for c, v in multipliers.items()) or "Ninguno"))
+        card.text("**Recompensas** (se acumulan)\n" + ("\n".join(
+            f"Nivel {n}: " + ", ".join(f"<@&{r}>" for r in roles) for n, roles in sorted(rewards.items()) if roles
+        ) or "Ninguna"))
+        return card
 
     @app_commands.command(name="niveles-multiplicador",
                           description="Multiplica la experiencia de los mensajes en un canal (solo admins)")
@@ -687,13 +716,20 @@ class NivelesCog(commands.Cog):
             await asyncio.to_thread(set_person_xp, guild.id, cuentas.group_of(guild.id, principal), xp)
             await self.sync_person(guild, principal, level_for_xp(xp))
 
-        summary = (f"✅ **{len(totals)}** personas importadas con su experiencia exacta de Amari.\n"
-                   f"👻 {unknown} «Unknown» saltados (ya no están en el servidor).")
+        card = tarjetas.Card(tarjetas.SUCCESS if not problems else tarjetas.WARNING)
+        card.text(f"## 📥 Importación de Amari\n"
+                  f"✅ **{len(totals)}** personas importadas con su experiencia exacta.\n"
+                  f"👻 {unknown} «Unknown» saltados (ya no están en el servidor).")
         if links_report:
-            summary += "\n\n**Cuentas vinculadas:**\n" + _clip_lines("\n".join(links_report), 500)
+            card.separator()
+            card.text("**🔗 Cuentas vinculadas**\n" + _clip_lines("\n".join(links_report), 600))
         if problems:
-            summary += (f"\n\n⚠️ **{len(problems)} sin resolver**: ajústalos con "
-                        f"`/niveles-ajustar usuario:@persona exp:N` o vincula sus cuentas y vuelve a importar.\n")
-            # Lo que quepa: Discord no admite mensajes de más de 2000 caracteres
-            summary += _clip_lines("\n".join(f"• {p}" for p in problems), MAX_MESSAGE_LENGTH - len(summary))
-        await interaction.followup.send(summary, ephemeral=True)
+            card.separator()
+            head = f"**⚠️ {len(problems)} sin resolver**\n"
+            hint = ("Ajústalos con /niveles-ajustar usuario:@persona exp:N, "
+                    "o vincula sus cuentas y vuelve a importar.")
+            # Lo que quepa: Discord no admite más de 4000 caracteres de texto por mensaje
+            room = tarjetas.MAX_TEXT - card.content_length() - len(head) - len(hint) - 20
+            card.text(head + _clip_lines("\n".join(f"• {p}" for p in problems), room))
+            card.note(hint)
+        await interaction.followup.send(view=card, ephemeral=True)

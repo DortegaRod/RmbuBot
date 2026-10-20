@@ -10,6 +10,7 @@ Su experiencia se suma como si fueran una sola (y servirá igual para la futura 
 """
 
 import logging
+import time
 from typing import Callable, Dict, List, Optional
 
 import discord
@@ -17,6 +18,7 @@ from discord import app_commands
 from discord.ext import commands
 
 import db
+import tarjetas
 
 logger = logging.getLogger(__name__)
 
@@ -126,13 +128,22 @@ def link_by_names(guild_id: int, members: List[discord.Member], lines: List[str]
 # COMANDOS
 # ==========================================
 
-class LinkRequestView(discord.ui.View):
-    """Pregunta a la otra cuenta si de verdad es de la misma persona. Solo ella puede responder."""
+class LinkRequest(tarjetas.Card):
+    """Tarjeta que pregunta a la otra cuenta si de verdad es de la misma persona. Solo ella puede responder."""
 
     def __init__(self, requester: discord.Member, target: discord.Member):
-        super().__init__(timeout=REQUEST_TIMEOUT)
+        super().__init__(tarjetas.LEVELS, timeout=REQUEST_TIMEOUT)
         self.requester, self.target = requester, target
         self.message: Optional[discord.Message] = None
+        expires = int(time.time()) + REQUEST_TIMEOUT
+        self.text(f"{target.mention}\n### 🔗 ¿Es tuya esta cuenta?\n"
+                  f"{requester.mention} dice que esta cuenta también es suya. Si es verdad, confírmalo "
+                  f"desde aquí y vuestra experiencia se sumará.")
+        self.note(f"Caduca <t:{expires}:R>")
+        confirm = discord.ui.Button(label="Sí, es mía", emoji="✅", style=discord.ButtonStyle.success)
+        reject = discord.ui.Button(label="No", emoji="❌", style=discord.ButtonStyle.secondary)
+        confirm.callback, reject.callback = self.confirm, self.reject
+        self.buttons(confirm, reject)
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.target.id:
@@ -141,27 +152,25 @@ class LinkRequestView(discord.ui.View):
             return False
         return True
 
-    @discord.ui.button(label="Sí, es mía", emoji="✅", style=discord.ButtonStyle.success)
-    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def confirm(self, interaction: discord.Interaction):
         self.stop()
         principal = link(interaction.guild_id, self.requester.id, self.target.id)
-        await interaction.response.edit_message(
-            content=f"🔗 Hecho: {self.requester.mention} y {self.target.mention} son la misma persona. "
-                    f"Su experiencia se suma.", view=None, allowed_mentions=NO_MENTIONS
-        )
+        await tarjetas.update(interaction, tarjetas.simple(
+            tarjetas.SUCCESS, f"🔗 Hecho: {self.requester.mention} y {self.target.mention} son la misma persona. "
+                              f"Su experiencia se suma."
+        ))
         if on_linked is not None:
             await on_linked(interaction.guild, principal)
 
-    @discord.ui.button(label="No", emoji="❌", style=discord.ButtonStyle.secondary)
-    async def reject(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def reject(self, interaction: discord.Interaction):
         self.stop()
-        await interaction.response.edit_message(content="❌ Vinculación cancelada.", view=None,
-                                                allowed_mentions=NO_MENTIONS)
+        await tarjetas.update(interaction, tarjetas.simple(tarjetas.DANGER, "❌ Vinculación cancelada."))
 
     async def on_timeout(self):
         if self.message is not None:
             try:
-                await self.message.edit(content="⌛ La solicitud de vinculación ha caducado.", view=None,
+                await self.message.edit(view=tarjetas.simple(discord.Colour.dark_grey(),
+                                                             "⌛ La solicitud de vinculación ha caducado."),
                                         allowed_mentions=NO_MENTIONS)
             except discord.HTTPException:
                 pass
@@ -185,10 +194,9 @@ class CuentasCog(commands.Cog):
                                                            ephemeral=True)
         if principal_of(interaction.guild_id, cuenta.id) == principal_of(interaction.guild_id, interaction.user.id):
             return await interaction.response.send_message("🔗 Esas cuentas ya están vinculadas.", ephemeral=True)
-        view = LinkRequestView(interaction.user, cuenta)
+        view = LinkRequest(interaction.user, cuenta)
+        # Solo se avisa a la otra cuenta (la mención va en la tarjeta)
         await interaction.response.send_message(
-            f"🔗 {cuenta.mention}, {interaction.user.mention} dice que esta cuenta también es suya. Si es verdad, "
-            f"confírmalo desde esta cuenta (caduca en {REQUEST_TIMEOUT // 60} minutos).",
             view=view, allowed_mentions=discord.AllowedMentions(everyone=False, roles=False, users=[cuenta])
         )
         view.message = await interaction.original_response()

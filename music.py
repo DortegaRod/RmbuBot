@@ -30,7 +30,7 @@ logger = logging.getLogger(__name__)
 LOOP_OFF = 0       # Sin repetición
 LOOP_CURRENT = 1   # Repetir la canción actual
 LOOP_QUEUE = 2     # Repetir toda la cola
-LOOP_LABELS = {LOOP_OFF: "Off", LOOP_CURRENT: "🔂 Canción", LOOP_QUEUE: "🔁 Cola"}
+LOOP_LABELS = {LOOP_OFF: "No", LOOP_CURRENT: "🔂 Canción", LOOP_QUEUE: "🔁 Cola"}
 
 STREAM_URL_TTL = 60 * 60       # Las URLs de audio de YouTube caducan: se re-extraen pasada 1 hora
 MAX_CONSECUTIVE_FAILURES = 5   # Canciones seguidas que no cargan antes de dejar de intentarlo

@@ -1,19 +1,28 @@
 """
 Controles de música compartidos por los comandos de barra y los botones:
-permisos ("controlar solo desde la llamada"), acciones, embeds y la tarjeta "Sonando ahora".
+permisos ("controlar solo desde la llamada"), acciones y las tarjetas de música
+("Sonando ahora" con botones, /current, /queue por páginas y lo que se añade con /play o /radio).
 """
 
 import logging
-from typing import Optional
+import math
+import time
+from typing import Dict, List, Optional, Union
 
 import discord
 from discord.utils import escape_markdown
 
-from music import music_manager, disconnect_player, MusicPlayer, Song, LOOP_LABELS
+import tarjetas
+from music import (music_manager, disconnect_player, MusicPlayer, Song, LOOP_LABELS,
+                   LOOP_OFF, LOOP_CURRENT)
 
 logger = logging.getLogger(__name__)
 
 NO_MENTIONS = discord.AllowedMentions.none()
+QUEUE_PAGE_SIZE = 10
+
+# Última acción sobre la música de cada servidor («⏸️ Pausada por @x»): la tarjeta la enseña
+_last_action: Dict[int, str] = {}
 
 
 # ==========================================
@@ -43,6 +52,10 @@ def song_label(song: Song, link: bool = True) -> str:
     if song.is_radio:
         return f"📻 {title}"  # Sin enlace: apuntaría al stream de audio en bruto
     return f"[{title}]({song.webpage_url})" if link else title
+
+
+def _length(song: Song) -> str:
+    return "🔴 En directo" if song.is_radio or not song.duration else f"`{fmt_time(song.duration)}`"
 
 
 # ==========================================
@@ -116,77 +129,212 @@ def resume(guild: discord.Guild) -> bool:
     return True
 
 
+def note_action(guild: discord.Guild, text: str):
+    """Apunta qué se ha hecho y quién: la tarjeta «Sonando ahora» lo enseña en vez de llenar el canal."""
+    _last_action[guild.id] = text
+
+
+def loop_action(member: discord.abc.User, mode: int) -> str:
+    if mode == LOOP_OFF:
+        return f"➡️ Bucle quitado por {member.mention}"
+    if mode == LOOP_CURRENT:
+        return f"🔂 Bucle de canción puesto por {member.mention}"
+    return f"🔁 Bucle de cola puesto por {member.mention}"
+
+
+# Avisos públicos (los usan tanto los comandos como los botones)
+def skip_text(member: discord.abc.User, song: Song) -> str:
+    return f"⏭️ {member.mention} ha saltado **{song_label(song, link=False)}**."
+
+
+def stop_text(member: discord.abc.User) -> str:
+    return f"⏹️ {member.mention} ha parado la música."
+
+
 # ==========================================
-# EMBEDS
+# TARJETAS
 # ==========================================
 
-def _base_embed(player: MusicPlayer, song: Song) -> discord.Embed:
+def _paused(player: MusicPlayer) -> bool:
     voice_client = player.guild.voice_client
-    if voice_client is not None and voice_client.is_paused():
-        title = "⏸️ En pausa"
-    else:
-        title = "📻 Sonando ahora" if song.is_radio else "🎶 Sonando ahora"
-    color = discord.Color.gold() if song.is_radio else discord.Color.green()
-    embed = discord.Embed(title=title, description=f"**{song_label(song)}**", color=color)
-    if song.thumbnail:
-        embed.set_thumbnail(url=song.thumbnail)
-    return embed
+    return voice_client is not None and voice_client.is_paused()
 
 
-def _footer(player: MusicPlayer, song: Song) -> str:
-    parts = [f"Bucle: {LOOP_LABELS[player.loop_mode]}", f"En cola: {len(player.queue)}"]
-    if song.requester:
-        parts.insert(0, f"Pedido por {song.requester.display_name}")
-    return " • ".join(parts)
+def _headline(player: MusicPlayer, song: Song) -> str:
+    if _paused(player):
+        return "⏸️ En pausa"
+    return "📻 Sonando ahora" if song.is_radio else "🎶 Sonando ahora"
 
 
-def build_card(player: MusicPlayer, song: Song) -> discord.Embed:
-    """Tarjeta "Sonando ahora" que se publica al empezar cada canción (va con los botones)."""
-    embed = _base_embed(player, song)
+def _title_line(song: Song) -> str:
+    # En las radios, el 📻 ya va en el título de la tarjeta
+    return f"**{escape_markdown(song.title[:100]) if song.is_radio else song_label(song)}**"
+
+
+def _requested_by(song: Song) -> str:
+    if song.requester is None:
+        return ""
+    return f"{'Puesta' if song.is_radio else 'Pedida'} por {song.requester.mention}"
+
+
+def _status(player: MusicPlayer, song: Optional[Song] = None) -> str:
+    """Bucle, cola y volumen. La canción que va a empezar (aún en la cola) no cuenta como «en cola»."""
+    waiting = sum(1 for queued in player.queue if queued is not song)
+    return f"Bucle: {LOOP_LABELS[player.loop_mode]} · {waiting} en cola · 🔊 {round(player.volume * 100)}%"
+
+
+def build_card(player: MusicPlayer, song: Song) -> tarjetas.Card:
+    """Tarjeta «Sonando ahora» con los botones; se publica al empezar cada canción."""
+    card = tarjetas.Card(tarjetas.RADIO if song.is_radio else tarjetas.MUSIC)
+    details = " · ".join(filter(None, [_length(song), _requested_by(song)]))
+    card.section(f"### {_headline(player, song)}\n{_title_line(song)}\n{details}", song.thumbnail, song.title[:200])
+    card.separator()
+    card.note("\n".join(filter(None, [_status(player, song), _last_action.get(player.guild.id)])))
+    paused = _paused(player)
+    card.buttons(
+        NowButton("pause", emoji="▶️" if paused else "⏸️", label="Seguir" if paused else "Pausa",
+                  style=discord.ButtonStyle.success if paused else discord.ButtonStyle.secondary),
+        NowButton("skip", emoji="⏭️", label="Saltar", style=discord.ButtonStyle.primary),
+        NowButton("stop", emoji="⏹️", label="Parar", style=discord.ButtonStyle.danger),
+        NowButton("loop", emoji="🔁", label="Bucle"),
+    )
+    return card
+
+
+def build_current_card(player: MusicPlayer, song: Song, live_title: Optional[str] = None) -> tarjetas.Card:
+    """/current: barra de progreso en canciones; en radios, la canción que están emitiendo."""
+    card = tarjetas.Card(tarjetas.RADIO if song.is_radio else tarjetas.MUSIC)
+    lines = [f"### {_headline(player, song)}", _title_line(song), _requested_by(song)]
+    card.section("\n".join(filter(None, lines)), song.thumbnail, song.title[:200])
     if song.is_radio or not song.duration:
-        embed.add_field(name="​", value="🔴 **EN DIRECTO**", inline=False)
-    else:
-        embed.add_field(name="Duración", value=f"`{fmt_time(song.duration)}`")
-    embed.set_footer(text=_footer(player, song))
-    return embed
-
-
-def build_current_embed(player: MusicPlayer, song: Song, live_title: Optional[str] = None) -> discord.Embed:
-    """Embed de /current: barra de progreso en canciones; en radios, la canción que emiten."""
-    embed = _base_embed(player, song)
-    if song.is_radio or not song.duration:
-        value = "🔴 **EN DIRECTO**"
+        live = "🔴 **En directo**"
         if live_title:
-            value += f"\n🎵 En antena: **{escape_markdown(live_title)}**"
-        embed.add_field(name="​", value=value, inline=False)
+            live += f"\n🎵 En antena: **{escape_markdown(live_title)}**"
+        card.text(live)
     else:
-        voice_client = player.guild.voice_client
-        paused = voice_client is not None and voice_client.is_paused()
         elapsed = min(player.get_elapsed(), song.duration)
-        icon = "⏸️" if paused else "▶️"
-        embed.add_field(
-            name="​",
-            value=f"{icon} `{fmt_time(elapsed)}` {progress_bar(elapsed, song.duration)} `{fmt_time(song.duration)}`",
-            inline=False
-        )
-    embed.set_footer(text=f"{_footer(player, song)} • Volumen: {int(player.volume * 100)}%")
-    return embed
+        icon = "⏸️" if _paused(player) else "▶️"
+        card.text(f"{icon} `{fmt_time(elapsed)}` {progress_bar(elapsed, song.duration)} `{fmt_time(song.duration)}`")
+    card.separator()
+    card.note(_status(player, song))
+    return card
+
+
+def _seconds_until(player: MusicPlayer, position: int) -> Optional[float]:
+    """Segundos que faltan para que suene la canción de la posición `position` de la cola, si se puede saber."""
+    current = player.current
+    if (current is None or current.is_radio or not current.duration or _paused(player)
+            or player.loop_mode == LOOP_CURRENT):
+        return None
+    wait = max(0.0, current.duration - player.get_elapsed())
+    for song in list(player.queue)[:position - 1]:
+        if song.is_radio or not song.duration:
+            return None
+        wait += song.duration
+    return wait
+
+
+def queued_card(player: MusicPlayer, song: Song, position: int) -> tarjetas.Card:
+    """Respuesta a /play o /radio cuando lo pedido aún no suena."""
+    card = tarjetas.Card(tarjetas.QUEUE)
+    details = _length(song)
+    wait = _seconds_until(player, position)
+    if wait is not None:
+        details += f" · sonará <t:{int(time.time() + wait)}:R>"  # Discord lo muestra como «dentro de 5 minutos»
+    card.section(f"### 📝 En cola · posición {position}\n{_title_line(song)}\n{details}", song.thumbnail, song.title[:200])
+    requested = _requested_by(song)
+    if requested:
+        card.note(requested)
+    return card
+
+
+def playlist_card(added: List[Song], left_out: int, requester: discord.abc.User) -> tarjetas.Card:
+    """Respuesta a /play con una playlist."""
+    card = tarjetas.Card(tarjetas.QUEUE)
+    text = f"### 📂 Playlist añadida\n**{len(added)}** canciones"
+    total = sum(song.duration or 0 for song in added if not song.is_radio)
+    if total:
+        text += f" · `{fmt_time(total)}`"
+    card.section(text, added[0].thumbnail if added else None)
+    notes = [f"Pedida por {requester.mention}"]
+    if left_out:
+        notes.insert(0, f"La cola está llena: {left_out} no {'cupo' if left_out == 1 else 'cupieron'}.")
+    card.note("\n".join(notes))
+    return card
+
+
+def build_queue_card(player: MusicPlayer, owner_id: int, page: Union[int, str]) -> tarjetas.Card:
+    """/queue: lo que suena y la cola, 10 canciones por página."""
+    songs = list(player.queue)
+    pages = max(1, math.ceil(len(songs) / QUEUE_PAGE_SIZE))
+    page = tarjetas.clamp_page(page, pages)
+    card = tarjetas.Card(tarjetas.QUEUE)
+    card.text("## 🎵 Cola de reproducción")
+    current = player.current
+    if current is not None:
+        if current.is_radio or not current.duration:
+            progress = "🔴 En directo"
+        else:
+            progress = f"`{fmt_time(min(player.get_elapsed(), current.duration))} / {fmt_time(current.duration)}`"
+        card.text(f"{'⏸️' if _paused(player) else '▶️'} **Sonando:** {song_label(current)} · {progress}")
+    start = (page - 1) * QUEUE_PAGE_SIZE
+    lines = [f"`{n}.` {song_label(song, link=False)} · {_length(song)}"
+             for n, song in enumerate(songs[start:start + QUEUE_PAGE_SIZE], start + 1)]
+    if lines:
+        card.separator()
+        card.text("\n".join(lines))
+    card.separator()
+    parts = [f"{len(songs)} en cola"]
+    if pages > 1:
+        parts.insert(0, f"Página {page} de {pages}")
+    total = sum(song.duration or 0 for song in songs if not song.is_radio)
+    if total:
+        parts.append(f"⏱️ {fmt_time(total)}")
+    parts.append(f"Bucle: {LOOP_LABELS[player.loop_mode]}")
+    card.note(" · ".join(parts))
+    card.buttons(*tarjetas.page_controls("cola", owner_id, page, pages))
+    return card
+
+
+async def render_queue_page(interaction: discord.Interaction, owner_id: int, page: Union[int, str]):
+    player = music_manager.peek(interaction.guild_id)
+    if player is None or (not player.queue and player.current is None):
+        return "📭 La cola está vacía."
+    return build_queue_card(player, owner_id, page)
+
+
+tarjetas.register_pages("cola", render_queue_page)
 
 
 # ==========================================
 # TARJETA "SONANDO AHORA" (ganchos del motor)
 # ==========================================
 
+def adopt_card(player: MusicPlayer, song: Song, message: discord.abc.Snowflake,
+               channel: Optional[discord.abc.Messageable]):
+    """
+    La respuesta a /play o /radio hace de tarjeta «Sonando ahora» de su canción, para que no salgan
+    dos mensajes. Se guarda a través del canal, porque el enlace de la interacción caduca a los 15 minutos.
+    """
+    target = message
+    permissions_for = getattr(channel, "permissions_for", None)
+    if permissions_for is not None and permissions_for(channel.guild.me).view_channel:
+        target = channel.get_partial_message(message.id)
+    player.now_playing_message = target
+    player.announced_song = song
+    _last_action.pop(player.guild.id, None)
+
+
 async def announce_now_playing(player: MusicPlayer, song: Song):
     """Publica la tarjeta con botones cuando empieza una canción."""
     if player.text_channel is None:
         return
     if song is player.announced_song and player.now_playing_message is not None:
-        return  # La misma canción repitiéndose en bucle: su tarjeta ya está publicada
+        return  # Ya tiene tarjeta: la misma canción en bucle, o la respuesta a /play
     await delete_now_playing(player)
     try:
         player.now_playing_message = await player.text_channel.send(
-            embed=build_card(player, song), view=NowPlayingView()
+            view=build_card(player, song), allowed_mentions=NO_MENTIONS
         )
         player.announced_song = song
     except discord.HTTPException as e:
@@ -209,6 +357,7 @@ async def delete_now_playing(player: MusicPlayer):
     message = player.now_playing_message
     player.now_playing_message = None
     player.announced_song = None
+    _last_action.pop(player.guild.id, None)
     if message is not None:
         try:
             await message.delete()
@@ -217,24 +366,30 @@ async def delete_now_playing(player: MusicPlayer):
 
 
 async def refresh_card(guild: discord.Guild):
-    """Actualiza la tarjeta tras un cambio de estado (pausa, bucle...)."""
+    """Actualiza la tarjeta tras un cambio de estado (pausa, bucle, volumen...)."""
     player = music_manager.peek(guild.id)
     if player is None or player.now_playing_message is None or player.current is None:
         return
     try:
-        await player.now_playing_message.edit(embed=build_card(player, player.current))
+        await player.now_playing_message.edit(view=build_card(player, player.current), allowed_mentions=NO_MENTIONS)
     except discord.HTTPException:
         pass
 
 
-class NowPlayingView(discord.ui.View):
+class NowButton(discord.ui.DynamicItem[discord.ui.Button], template=r"reimbou:np:(?P<action>pause|skip|stop|loop)"):
     """
-    Botones de la tarjeta "Sonando ahora". Es persistente (custom_id fijos): si el bot se
-    reinicia, los botones de tarjetas antiguas responden con un aviso en vez de fallar.
+    Botones de la tarjeta "Sonando ahora". Son persistentes: si el bot se reinicia, los de
+    tarjetas antiguas responden con un aviso en vez de fallar.
     """
 
-    def __init__(self):
-        super().__init__(timeout=None)
+    def __init__(self, action: str, *, emoji=None, label: Optional[str] = None,
+                 style: discord.ButtonStyle = discord.ButtonStyle.secondary):
+        super().__init__(discord.ui.Button(emoji=emoji, label=label, style=style, custom_id=f"reimbou:np:{action}"))
+        self.action = action
+
+    @classmethod
+    async def from_custom_id(cls, interaction: discord.Interaction, item: discord.ui.Button, match):
+        return cls(match["action"], emoji=item.emoji, label=item.label, style=item.style)
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         player = music_manager.peek(interaction.guild_id)
@@ -248,40 +403,36 @@ class NowPlayingView(discord.ui.View):
             return False
         return True
 
-    async def on_error(self, interaction: discord.Interaction, error: Exception, item: discord.ui.Item):
-        logger.error("Error en un botón de música", exc_info=error)
-        if not interaction.response.is_done():
-            await interaction.response.send_message("❌ Algo ha fallado con ese botón.", ephemeral=True)
+    async def callback(self, interaction: discord.Interaction):
+        await tarjetas.run_safely(interaction, getattr(self, f"_{self.action}"))
 
-    @discord.ui.button(emoji="⏯️", label="Pausa", style=discord.ButtonStyle.secondary, custom_id="reimbou:np:pause")
-    async def pause_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not (pause(interaction.guild) or resume(interaction.guild)):
+    async def _pause(self, interaction: discord.Interaction):
+        guild = interaction.guild
+        if pause(guild):
+            note_action(guild, f"⏸️ Pausada por {interaction.user.mention}")
+        elif resume(guild):
+            note_action(guild, f"▶️ Reanudada por {interaction.user.mention}")
+        else:
             return await interaction.response.send_message("❌ No hay nada sonando.", ephemeral=True)
         player = music_manager.peek(interaction.guild_id)
-        await interaction.response.edit_message(embed=build_card(player, player.current))
+        await tarjetas.update(interaction, build_card(player, player.current))
 
-    @discord.ui.button(emoji="⏭️", label="Saltar", style=discord.ButtonStyle.primary, custom_id="reimbou:np:skip")
-    async def skip_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def _skip(self, interaction: discord.Interaction):
         skipped = request_skip(interaction.guild)
         if skipped is None:
             return await interaction.response.send_message("❌ No hay nada sonando.", ephemeral=True)
-        await interaction.response.send_message(
-            f"⏭️ {interaction.user.mention} saltó **{song_label(skipped, link=False)}**.", allowed_mentions=NO_MENTIONS
-        )
+        await interaction.response.send_message(skip_text(interaction.user, skipped), allowed_mentions=NO_MENTIONS)
 
-    @discord.ui.button(emoji="⏹️", label="Parar", style=discord.ButtonStyle.danger, custom_id="reimbou:np:stop")
-    async def stop_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_message(
-            f"⏹️ {interaction.user.mention} paró la música.", allowed_mentions=NO_MENTIONS
-        )
+    async def _stop(self, interaction: discord.Interaction):
+        await interaction.response.send_message(stop_text(interaction.user), allowed_mentions=NO_MENTIONS)
         await disconnect_player(interaction.guild)
 
-    @discord.ui.button(emoji="🔁", label="Bucle", style=discord.ButtonStyle.secondary, custom_id="reimbou:np:loop")
-    async def loop_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def _loop(self, interaction: discord.Interaction):
         player = music_manager.peek(interaction.guild_id)
         player.loop_mode = (player.loop_mode + 1) % len(LOOP_LABELS)
+        note_action(interaction.guild, loop_action(interaction.user, player.loop_mode))
         if player.current is None:  # La canción terminó justo al pulsar
             return await interaction.response.send_message(
                 f"Bucle: **{LOOP_LABELS[player.loop_mode]}**", ephemeral=True
             )
-        await interaction.response.edit_message(embed=build_card(player, player.current))
+        await tarjetas.update(interaction, build_card(player, player.current))

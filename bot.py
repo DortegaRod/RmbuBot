@@ -16,13 +16,15 @@ from discord.utils import escape_markdown
 
 from config import TOKEN, ADMIN_LOG_CHANNEL_ID, AUDIT_WAIT_SECONDS, MAX_QUEUE_SIZE
 import audit
+import ayuda
 import cache
 import controls
 import db
-from notifier import send_admin_embed, send_bulk_delete_log
+import tarjetas
+from notifier import send_deletion_log, send_bulk_delete_log
 from music import (
     music_manager, search_youtube, play_next, disconnect_player, empty_channel_disconnect,
-    log_dependency_status, LOOP_LABELS, SearchError, Song
+    log_dependency_status, SearchError, Song, LOOP_OFF, LOOP_CURRENT
 )
 from radios import RADIOS, RADIOS_BY_KEY, RADIO_ICON, fetch_now_playing
 from palabra import PalabraCog
@@ -31,6 +33,8 @@ from niveles import NivelesCog
 
 # --- INICIALIZACIÓN ---
 logger = logging.getLogger(__name__)
+
+NO_MENTIONS = discord.AllowedMentions.none()  # Mencionar en los avisos sin notificar a nadie
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -55,16 +59,18 @@ class MusicBot(commands.Bot):
         music_manager.on_track_start = controls.announce_now_playing
         music_manager.on_track_error = controls.announce_error
         music_manager.on_player_end = controls.delete_now_playing
-        # Botones persistentes: las tarjetas antiguas siguen respondiendo tras un reinicio
-        self.add_view(controls.NowPlayingView())
+        # Botones y menús persistentes: siguen respondiendo tras un reinicio
+        self.add_dynamic_items(controls.NowButton, tarjetas.PageButton, ayuda.HelpMenu)
         # Juego diario: /palabra, /palabra-stats, /setup-palabra y el anuncio de cada día
         await self.add_cog(PalabraCog(self))
         # Cuentas vinculadas (varias cuentas de una misma persona); los niveles las usan
         await self.add_cog(CuentasCog(self))
         # Niveles: experiencia por mensajes y voz, avisos y roles de recompensa
         await self.add_cog(NivelesCog(self))
-        # Sincroniza los comandos de barra (Slash Commands) con Discord al iniciar
-        await self.tree.sync()
+        # Sincroniza los comandos de barra (Slash Commands) con Discord al iniciar.
+        # Sus IDs permiten mencionarlos en los mensajes: se ven como /comando y se pueden pulsar.
+        for command in await self.tree.sync():
+            tarjetas.command_ids[command.name] = command.id
 
 
 bot = MusicBot()
@@ -240,7 +246,7 @@ async def on_raw_message_delete(payload: discord.RawMessageDeleteEvent):
 
     edited = record.get("edited_content")
     original = record["content"]
-    await send_admin_embed(
+    await send_deletion_log(
         admin_channel,
         author_display=_user_display(author_id, record.get("author_name")),
         executor_display=executor_display,
@@ -401,12 +407,11 @@ async def setup(
 
     if canal is None:
         configured = db.get_music_channel(interaction.guild_id)
-        status = (f"📌 Los comandos del bot solo funcionan en <#{configured}>." if configured
-                  else "📌 No hay canal configurado: los comandos funcionan en cualquier canal.")
-        return await interaction.response.send_message(
-            f"{status}\nUsa `/setup canal:#canal` para cambiarlo o `/setup quitar:True` para quitar la restricción.",
-            ephemeral=True
-        )
+        status = (f"Los comandos del bot solo funcionan en <#{configured}>." if configured
+                  else "No hay canal fijado: los comandos funcionan en cualquier canal.")
+        card = tarjetas.Card(tarjetas.INFO).text(f"### ⚙️ Canal de comandos\n{status}")
+        card.note("Cámbialo con /setup canal:#canal, o quita la restricción con /setup quitar:True.")
+        return await interaction.response.send_message(view=card, ephemeral=True)
 
     perms = canal.permissions_for(interaction.guild.me)
     if not (perms.view_channel and perms.send_messages and perms.embed_links):
@@ -418,7 +423,7 @@ async def setup(
     if db.set_music_channel(interaction.guild_id, canal.id):
         await interaction.response.send_message(
             f"✅ Listo. A partir de ahora los comandos del bot se usan en {canal.mention}.\n"
-            f"*(Vuelve a ejecutar `/setup` para cambiarlo.)*"
+            f"-# Vuelve a usar /setup para cambiarlo."
         )
     else:
         await interaction.response.send_message("❌ No pude guardar la configuración. Revisa los logs.", ephemeral=True)
@@ -467,31 +472,24 @@ async def play(interaction: discord.Interaction, busqueda: str):
         return await interaction.followup.send(f"📭 La cola está llena ({MAX_QUEUE_SIZE} canciones).")
 
     starts_now = player.current is None and not vc.is_playing() and not vc.is_paused()
+    # Si lo pedido empieza ya, la respuesta es su tarjeta «Sonando ahora» (con botones): un mensaje, no dos
+    first_up = starts_now and len(songs) == 1 and bool(player.queue) and player.queue[0] is added[0]
 
-    # Generación de UI (Embed)
-    if len(songs) > 1:
-        description = f"Se han añadido **{len(added)}** canciones."
-        if len(added) < len(songs):
-            description += f"\n*(La cola está llena: {len(songs) - len(added)} no cupieron.)*"
-        embed = discord.Embed(title="📂 Playlist añadida", description=description, color=discord.Color.purple())
+    if first_up:
+        card = controls.build_card(player, added[0])
+    elif len(songs) > 1:
+        card = controls.playlist_card(added, len(songs) - len(added), interaction.user)
     else:
-        song = added[0]
-        description = f"**{controls.song_label(song)}**"
-        if song.duration:
-            description += f"\nDuración: `{controls.fmt_time(song.duration)}`"
-        embed = discord.Embed(
-            title="🎶 Empieza a sonar" if starts_now else f"📝 En cola · posición {len(player.queue)}",
-            description=description,
-            color=discord.Color.green() if starts_now else discord.Color.blue()
-        )
-        if song.thumbnail:
-            embed.set_thumbnail(url=song.thumbnail)
-    embed.set_footer(text=f"Pedido por {interaction.user.display_name}", icon_url=interaction.user.display_avatar.url)
-    await interaction.followup.send(embed=embed)
+        card = controls.queued_card(player, added[0], len(player.queue))
+    message = await interaction.followup.send(view=card, allowed_mentions=NO_MENTIONS, wait=True)
+    if first_up:
+        controls.adopt_card(player, added[0], message, interaction.channel)
 
-    # Iniciar motor si estaba en reposo (después de responder, para que la tarjeta salga detrás)
+    # Iniciar motor si estaba en reposo (después de responder, para que la respuesta salga antes que nada)
     if starts_now:
         await play_next(vc, player)
+    else:
+        await controls.refresh_card(interaction.guild)  # La tarjeta dice cuántas hay en cola
 
 
 @bot.tree.command(name="radio", description="Sintoniza una radio española en directo")
@@ -524,22 +522,20 @@ async def radio(interaction: discord.Interaction, emisora: app_commands.Choice[s
     if not player.add_song(radio_song):
         return await interaction.followup.send(f"📭 La cola está llena ({MAX_QUEUE_SIZE} canciones).")
     starts_now = player.current is None and not vc.is_playing() and not vc.is_paused()
+    first_up = starts_now and player.queue[0] is radio_song
 
-    if starts_now:
-        embed = discord.Embed(title="📻 Sintonizando radio", description=f"**{station.emoji} {station.name}**",
-                              color=discord.Color.gold())
+    if first_up:
+        card = controls.build_card(player, radio_song)
     else:
-        embed = discord.Embed(
-            title=f"📝 Radio en cola · posición {len(player.queue)}",
-            description=f"**{station.emoji} {station.name}**\n*Usa `/skip` para llegar antes.*",
-            color=discord.Color.gold()
-        )
-    embed.set_thumbnail(url=RADIO_ICON)
-    embed.set_footer(text="Emisión en directo 24/7", icon_url=interaction.user.display_avatar.url)
-    await interaction.followup.send(embed=embed)
+        card = controls.queued_card(player, radio_song, len(player.queue))
+    message = await interaction.followup.send(view=card, allowed_mentions=NO_MENTIONS, wait=True)
+    if first_up:
+        controls.adopt_card(player, radio_song, message, interaction.channel)
 
     if starts_now:
         await play_next(vc, player)
+    else:
+        await controls.refresh_card(interaction.guild)
 
 
 @bot.tree.command(name="current", description="Muestra lo que suena ahora (barra de progreso, o la canción de la radio)")
@@ -552,43 +548,24 @@ async def current(interaction: discord.Interaction):
 
     song = player.current
     if not song.is_radio:
-        return await interaction.response.send_message(embed=controls.build_current_embed(player, song))
+        return await interaction.response.send_message(view=controls.build_current_card(player, song),
+                                                       allowed_mentions=NO_MENTIONS)
 
     # Radio: leer el título que está emitiendo (puede tardar un par de segundos)
     await interaction.response.defer()
     live_title = await fetch_now_playing(song.stream_url, station_name=song.title)
-    await interaction.followup.send(embed=controls.build_current_embed(player, song, live_title))
+    await interaction.followup.send(view=controls.build_current_card(player, song, live_title),
+                                    allowed_mentions=NO_MENTIONS)
 
 
-@bot.tree.command(name="queue", description="Muestra la canción actual y las próximas 10 de la cola")
+@bot.tree.command(name="queue", description="Muestra lo que suena y la cola, por páginas")
 @app_commands.guild_only()
 async def queue(interaction: discord.Interaction):
     player = music_manager.peek(interaction.guild_id)
     if player is None or (not player.queue and not player.current):
-        return await interaction.response.send_message("📭 La cola está vacía.")
-
-    lines = []
-    if player.current:
-        lines.append(f"▶️ **Sonando ahora:**\n{controls.song_label(player.current)}\n")
-
-    for i, song in enumerate(list(player.queue)[:10], 1):
-        if song.is_radio:
-            extra = " · 🔴 directo"
-        else:
-            extra = f" · `{controls.fmt_time(song.duration)}`" if song.duration else ""
-        lines.append(f"`{i}.` {controls.song_label(song, link=False)}{extra}")
-
-    if len(player.queue) > 10:
-        lines.append(f"\n*...y {len(player.queue) - 10} más*")
-
-    footer = f"Modo Bucle: {LOOP_LABELS[player.loop_mode]} | Total: {len(player.queue)}"
-    total_seconds = sum(song.duration or 0 for song in player.queue if not song.is_radio)
-    if total_seconds:
-        footer += f" | Duración: {controls.fmt_time(total_seconds)}"
-    embed = discord.Embed(title="🎵 Cola de Reproducción", description="\n".join(lines), color=discord.Color.blue())
-    embed.set_footer(text=footer)
-
-    await interaction.response.send_message(embed=embed)
+        return await interaction.response.send_message("📭 La cola está vacía.", ephemeral=True)
+    await interaction.response.send_message(view=controls.build_queue_card(player, interaction.user.id, 1),
+                                            allowed_mentions=NO_MENTIONS)
 
 
 @bot.tree.command(name="skip", description="Termina la pista actual y pasa a la siguiente")
@@ -598,9 +575,12 @@ async def skip(interaction: discord.Interaction):
         return
     skipped = controls.request_skip(interaction.guild)
     if skipped is None:
-        return await interaction.response.send_message("❌ Nada sonando.", ephemeral=True)
-    await interaction.response.send_message(f"⏭️ Saltada: **{controls.song_label(skipped, link=False)}**")
+        return await interaction.response.send_message("❌ No hay nada sonando.", ephemeral=True)
+    await interaction.response.send_message(controls.skip_text(interaction.user, skipped), allowed_mentions=NO_MENTIONS)
 
+
+# /pause, /resume, /loop y /volume contestan solo a quien los usa: la tarjeta «Sonando ahora»
+# ya enseña al canal el cambio y quién lo ha hecho.
 
 @bot.tree.command(name="pause", description="Pausa la reproducción actual")
 @app_commands.guild_only()
@@ -609,7 +589,9 @@ async def pause(interaction: discord.Interaction):
         return
     if not controls.pause(interaction.guild):
         return await interaction.response.send_message("❌ No hay nada sonando.", ephemeral=True)
-    await interaction.response.send_message("⏸️ Reproducción **pausada**. Usa `/resume` para continuar.")
+    controls.note_action(interaction.guild, f"⏸️ Pausada por {interaction.user.mention}")
+    await interaction.response.send_message("⏸️ Pausada. Sigue con /resume o con el botón de la tarjeta.",
+                                            ephemeral=True)
     await controls.refresh_card(interaction.guild)
 
 
@@ -620,7 +602,8 @@ async def resume(interaction: discord.Interaction):
         return
     if not controls.resume(interaction.guild):
         return await interaction.response.send_message("❌ No hay nada pausado.", ephemeral=True)
-    await interaction.response.send_message("▶️ Reproducción **reanudada**.")
+    controls.note_action(interaction.guild, f"▶️ Reanudada por {interaction.user.mention}")
+    await interaction.response.send_message("▶️ Reanudada.", ephemeral=True)
     await controls.refresh_card(interaction.guild)
 
 
@@ -637,9 +620,10 @@ async def loop(interaction: discord.Interaction, modo: app_commands.Choice[int])
 
     player = music_manager.get_player(interaction.guild)
     player.loop_mode = modo.value
+    controls.note_action(interaction.guild, controls.loop_action(interaction.user, modo.value))
 
-    msgs = {0: "Modo bucle **desactivado**.", 1: "🔂 Bucle: **Canción Actual**.", 2: "🔁 Bucle: **Toda la Cola**."}
-    await interaction.response.send_message(msgs[modo.value])
+    msgs = {LOOP_OFF: "➡️ Bucle **quitado**.", LOOP_CURRENT: "🔂 Se repetirá la **canción actual**."}
+    await interaction.response.send_message(msgs.get(modo.value, "🔁 Se repetirá **toda la cola**."), ephemeral=True)
     await controls.refresh_card(interaction.guild)
 
 
@@ -654,7 +638,10 @@ async def shuffle(interaction: discord.Interaction):
         return await interaction.response.send_message("❌ Necesitas al menos 2 canciones en la cola.", ephemeral=True)
 
     player.shuffle_queue()
-    await interaction.response.send_message("🔀 **Cola mezclada** aleatoriamente.")
+    await interaction.response.send_message(
+        f"🔀 {interaction.user.mention} ha mezclado la cola (**{len(player.queue)}** canciones).",
+        allowed_mentions=NO_MENTIONS
+    )
 
 
 @bot.tree.command(name="remove", description="Quita una canción de la cola por su número (mira /queue)")
@@ -673,7 +660,11 @@ async def remove(interaction: discord.Interaction, posicion: int):
 
     removed = player.remove_at(posicion - 1)
     if removed:
-        await interaction.response.send_message(f"🗑️ Quitada de la cola: **{controls.song_label(removed, link=False)}**")
+        await interaction.response.send_message(
+            f"🗑️ {interaction.user.mention} ha quitado **{controls.song_label(removed, link=False)}** de la cola.",
+            allowed_mentions=NO_MENTIONS
+        )
+        await controls.refresh_card(interaction.guild)
     else:
         await interaction.response.send_message("❌ No pude quitar esa canción.", ephemeral=True)
 
@@ -692,7 +683,9 @@ async def volume(interaction: discord.Interaction, nivel: app_commands.Range[int
     if vc and vc.source and isinstance(vc.source, discord.PCMVolumeTransformer):
         vc.source.volume = player.volume
 
-    await interaction.response.send_message(f"🔊 Volumen ajustado al **{nivel}%**.")
+    controls.note_action(interaction.guild, f"🔊 Volumen puesto al {nivel}% por {interaction.user.mention}")
+    await interaction.response.send_message(f"🔊 Volumen al **{nivel}%**.", ephemeral=True)
+    await controls.refresh_card(interaction.guild)
 
 
 @bot.tree.command(name="clear", description="Vacía la cola (sin cortar la canción que suena ahora)")
@@ -707,8 +700,11 @@ async def clear(interaction: discord.Interaction):
 
     player.clear_queue()
     await interaction.response.send_message(
-        f"🧹 Cola vaciada (**{count}** canciones eliminadas). La canción actual sigue sonando."
+        f"🧹 {interaction.user.mention} ha vaciado la cola (**{count}** "
+        f"{'canción' if count == 1 else 'canciones'}). La que suena sigue.",
+        allowed_mentions=NO_MENTIONS
     )
+    await controls.refresh_card(interaction.guild)
 
 
 @bot.tree.command(name="stop", description="Detiene la música, limpia la cola y expulsa al bot")
@@ -718,78 +714,16 @@ async def stop(interaction: discord.Interaction):
         return
     if interaction.guild.voice_client is None:
         return await interaction.response.send_message("❌ No estoy conectado.", ephemeral=True)
-    await interaction.response.send_message("👋 Adiós.")
+    await interaction.response.send_message(controls.stop_text(interaction.user), allowed_mentions=NO_MENTIONS)
     await disconnect_player(interaction.guild)
 
 
 @bot.tree.command(name="help", description="Muestra la lista de comandos del bot")
 @app_commands.guild_only()
 async def help_cmd(interaction: discord.Interaction):
-    """Lista todos los comandos disponibles."""
-    embed = discord.Embed(
-        title="🎧 Comandos de ReimbouBOT",
-        color=discord.Color.blurple()
-    )
-    embed.add_field(
-        name="🎵 Música",
-        value=(
-            "`/play <búsqueda>` — Reproduce de YouTube (búsqueda, enlace o playlist)\n"
-            "`/radio <emisora>` — Radio española en directo\n"
-            "`/current` — Qué suena ahora (en radios, la canción que emiten)\n"
-            "`/queue` — Ver la cola\n"
-            "`/skip` — Saltar a la siguiente\n"
-            "`/pause` · `/resume` — Pausar / reanudar\n"
-            "`/loop <modo>` — Bucle (off / canción / cola)\n"
-            "`/shuffle` — Mezclar la cola\n"
-            "`/remove <nº>` — Quitar una canción de la cola\n"
-            "`/clear` — Vaciar la cola\n"
-            "`/volume <0-100>` — Ajustar el volumen\n"
-            "`/stop` — Parar y desconectar el bot"
-        ),
-        inline=False
-    )
-    embed.add_field(
-        name="🎛️ Botones y normas",
-        value=(
-            "Cada canción se anuncia con botones ⏯️ ⏭️ ⏹️ 🔁.\n"
-            "Para controlar la música tienes que estar en el canal de voz del bot "
-            "*(los moderadores pueden desde cualquier sitio)*."
-        ),
-        inline=False
-    )
-    embed.add_field(
-        name="🟩 Palabra del día",
-        value=(
-            "`/palabra` — Adivina la palabra de hoy en 6 intentos (Wordle en español)\n"
-            "`/palabra-stats [usuario]` — Estadísticas y rachas"
-        ),
-        inline=False
-    )
-    embed.add_field(
-        name="📈 Niveles",
-        value=(
-            "`/nivel [usuario]` — Nivel, experiencia y puesto\n"
-            "`/ranking [página]` — Clasificación del servidor\n"
-            "`/vincular <cuenta>` — Une otra cuenta tuya: se suma su experiencia\n"
-            "`/desvincular [cuenta]` — Separa una cuenta vinculada\n"
-            "*Se gana experiencia escribiendo y estando en voz.*"
-        ),
-        inline=False
-    )
-    embed.add_field(
-        name="⚙️ Administración",
-        value=(
-            "`/setup <canal>` — Fija el canal de comandos del bot\n"
-            "`/setup-palabra <canal> [hora] [rol]` — Canal, hora y rol al que avisar del anuncio diario de la palabra\n"
-            "`/setup-niveles <canal>` — Activa los niveles y elige dónde se anuncian\n"
-            "`/niveles-recompensa` · `/niveles-multiplicador` · `/niveles-importar` · `/niveles-ajustar`\n"
-            "`/vincular-cuentas` — Vincula cuentas de una persona sin pedirle confirmación\n"
-            "*(requieren Gestionar servidor)*"
-        ),
-        inline=False
-    )
-    embed.set_footer(text="ReimbouBOT")
-    await interaction.response.send_message(embed=embed, ephemeral=True)
+    """Tarjeta de ayuda con un menú por secciones (solo la ve quien la pide)."""
+    await interaction.response.send_message(view=ayuda.help_card(interaction.user), ephemeral=True,
+                                            allowed_mentions=NO_MENTIONS)
 
 
 @bot.tree.error
