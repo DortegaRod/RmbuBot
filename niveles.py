@@ -246,11 +246,13 @@ def read_link_groups() -> List[str]:
     return [line.strip() for line in lines if line.strip() and not line.lstrip().startswith("#")]
 
 
-def plan_import(guild_id: int, members: List[discord.Member],
-                entries: List[Tuple[str, int, int]]) -> Tuple[Dict[int, int], List[str], int]:
+def plan_import(guild_id: int, members: List[discord.Member], entries: List[Tuple[str, int, int]],
+                groups: List[str] = ()) -> Tuple[Dict[int, int], List[str], int]:
     """
     Reparte la clasificación entre las personas del servidor, buscando cada nombre por usuario,
     nombre global o apodo y sumando las cuentas vinculadas.
+    Los grupos confirmados (`groups`, las líneas de datos/cuentas_vinculadas.txt) mandan: todas las
+    entradas con sus nombres son de esa persona, aunque alguna de sus cuentas ya no esté en el servidor.
     Devuelve ({cuenta principal: experiencia total}, problemas, nº de «Unknown»).
     """
     index: Dict[str, Dict[int, discord.Member]] = defaultdict(dict)
@@ -261,38 +263,67 @@ def plan_import(guild_id: int, members: List[discord.Member],
             if name:
                 index[name.casefold()][member.id] = member
 
+    confirmed: Dict[str, int] = {}  # Nombre de un grupo confirmado -> su persona
+    unmatched: Dict[str, str] = {}  # Nombre de un grupo del que no hay ninguna cuenta aquí -> línea del grupo
+    for line in groups:
+        names = [n.strip().casefold() for n in line.split("|") if n.strip()]
+        accounts = [user_id for name in names for user_id in sorted(index.get(name, {}))]
+        for name in names:
+            if accounts:
+                confirmed[name] = cuentas.principal_of(guild_id, accounts[0])
+            else:
+                unmatched[name] = line
+
     found: Dict[int, Dict[Tuple[str, int], str]] = defaultdict(dict)  # principal -> {(nombre, exp): nombre original}
-    problems: List[str] = []
+    trusted = set()  # Personas de un grupo confirmado: no se comprueba cuántas cuentas tienen
+    missing: Dict[str, Dict[Tuple[str, int], int]] = defaultdict(dict)  # Grupo sin cuentas -> sus entradas
+    problems: List[Tuple[int, str]] = []  # (experiencia en juego, texto): primero lo que más importa
     unknown = 0
     for name, xp, level in entries:
-        if name.casefold() == "unknown":
+        key = name.casefold()
+        shown = escape_markdown(name)  # Los _ de los nombres no deben volverse cursiva
+        if key == "unknown":
             unknown += 1  # Gente que ya no está en el servidor
             continue
         if level_for_xp(xp) != level:
-            problems.append(f"«{name}»: {_fmt(xp)} de experiencia no da nivel {level}; revísalo")
+            problems.append((xp, f"«{shown}»: {_fmt(xp)} de experiencia no da nivel {level}; revísalo"))
             continue
-        candidates = index.get(name.casefold(), {})
+        # Repetido con la misma experiencia = la misma entrada (pasa al cambiar de página en la web)
+        if key in confirmed:
+            found[confirmed[key]][(key, xp)] = name
+            trusted.add(confirmed[key])
+            continue
+        if key in unmatched:
+            missing[unmatched[key]][(key, xp)] = xp
+            continue
+        candidates = index.get(key, {})
         people = {cuentas.principal_of(guild_id, user_id) for user_id in candidates}
         if not people:
-            problems.append(f"«{name}» ({_fmt(xp)} exp): no lo encuentro en el servidor")
+            problems.append((xp, f"«{shown}» ({_fmt(xp)} exp): no lo encuentro en el servidor"))
         elif len(people) > 1:
-            problems.append(f"«{name}» ({_fmt(xp)} exp): hay {len(people)} personas distintas con ese nombre "
-                            f"(vincúlalas si son la misma)")
+            problems.append((xp, f"«{shown}» ({_fmt(xp)} exp): hay {len(people)} personas distintas con ese nombre "
+                                 f"(vincúlalas si son la misma)"))
         else:
-            # Repetido con la misma experiencia = la misma entrada (pasa al cambiar de página en la web)
-            found[people.pop()][(name.casefold(), xp)] = name
+            found[people.pop()][(key, xp)] = name
+
+    for line, group_entries in missing.items():
+        total = sum(group_entries.values())
+        problems.append((total, f"«{escape_markdown(line)}» ({_fmt(total)} exp en total): "
+                                f"no encuentro ninguna de sus cuentas"))
 
     totals: Dict[int, int] = {}
     for principal, person_entries in found.items():
         accounts = len(cuentas.group_of(guild_id, principal))
-        if len(person_entries) > accounts:
+        if principal not in trusted and len(person_entries) > accounts:
             amounts = " y ".join(_fmt(xp) for _, xp in sorted(person_entries, key=lambda e: -e[1]))
-            problems.append(f"«{next(iter(person_entries.values()))}» sale {len(person_entries)} veces ({amounts} exp) "
-                            f"pero aquí tiene {accounts} {'cuenta' if accounts == 1 else 'cuentas'}; "
-                            f"si las otras son suyas, vincúlalas")
+            problems.append((sum(xp for _, xp in person_entries),
+                             f"«{escape_markdown(next(iter(person_entries.values())))}» sale {len(person_entries)} "
+                             f"veces ({amounts} exp) pero aquí tiene {accounts} "
+                             f"{'cuenta' if accounts == 1 else 'cuentas'}; si las otras son suyas, vincúlalas"))
             continue
         totals[principal] = sum(xp for _, xp in person_entries)
-    return totals, problems, unknown
+    problems.sort(key=lambda problem: -problem[0])  # Si hay que recortar la lista, se ve lo que más importa
+    return totals, [text for _, text in problems], unknown
 
 
 # ==========================================
@@ -710,8 +741,9 @@ class NivelesCog(commands.Cog):
             )
         guild = interaction.guild
         # Primero las cuentas de la misma persona, para que su experiencia se sume
-        links_report = cuentas.link_by_names(guild.id, guild.members, read_link_groups())
-        totals, problems, unknown = plan_import(guild.id, guild.members, entries)
+        groups = read_link_groups()
+        links_report = cuentas.link_by_names(guild.id, guild.members, groups)
+        totals, problems, unknown = plan_import(guild.id, guild.members, entries, groups)
         for principal, xp in totals.items():
             await asyncio.to_thread(set_person_xp, guild.id, cuentas.group_of(guild.id, principal), xp)
             await self.sync_person(guild, principal, level_for_xp(xp))

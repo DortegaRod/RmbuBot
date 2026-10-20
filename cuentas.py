@@ -16,6 +16,7 @@ from typing import Callable, Dict, List, Optional
 import discord
 from discord import app_commands
 from discord.ext import commands
+from discord.utils import escape_markdown
 
 import db
 import tarjetas
@@ -116,11 +117,11 @@ def link_by_names(guild_id: int, members: List[discord.Member], lines: List[str]
                     accounts.append(member)
         if len(accounts) < 2:
             found = "solo encuentro 1 cuenta" if accounts else "no encuentro ninguna cuenta"
-            report.append(f"«{line}»: {found}, no vinculo nada")
+            report.append(f"«{escape_markdown(line)}»: {found}, no vinculo nada")
             continue
         for member in accounts[1:]:
             link(guild_id, accounts[0].id, member.id)
-        report.append(f"🔗 {names[0]}: {len(accounts)} cuentas")
+        report.append(f"🔗 {escape_markdown(names[0])}: {len(accounts)} cuentas")
     return report
 
 
