@@ -26,6 +26,7 @@ from music import (
 )
 from radios import RADIOS, RADIOS_BY_KEY, RADIO_ICON, fetch_now_playing
 from palabra import PalabraCog
+from niveles import NivelesCog
 
 # --- INICIALIZACIÓN ---
 logger = logging.getLogger(__name__)
@@ -57,6 +58,8 @@ class MusicBot(commands.Bot):
         self.add_view(controls.NowPlayingView())
         # Juego diario: /palabra, /palabra-stats, /setup-palabra y el anuncio de cada día
         await self.add_cog(PalabraCog(self))
+        # Niveles: experiencia por mensajes y voz, avisos y roles de recompensa
+        await self.add_cog(NivelesCog(self))
         # Sincroniza los comandos de barra (Slash Commands) con Discord al iniciar
         await self.tree.sync()
 
@@ -760,10 +763,21 @@ async def help_cmd(interaction: discord.Interaction):
         inline=False
     )
     embed.add_field(
+        name="📈 Niveles",
+        value=(
+            "`/nivel [usuario]` — Nivel, experiencia y puesto\n"
+            "`/ranking [página]` — Clasificación del servidor\n"
+            "*Se gana experiencia escribiendo y estando en voz.*"
+        ),
+        inline=False
+    )
+    embed.add_field(
         name="⚙️ Administración",
         value=(
             "`/setup <canal>` — Fija el canal de comandos del bot\n"
             "`/setup-palabra <canal> [hora] [rol]` — Canal, hora y rol al que avisar del anuncio diario de la palabra\n"
+            "`/setup-niveles <canal>` — Activa los niveles y elige dónde se anuncian\n"
+            "`/niveles-recompensa` · `/niveles-multiplicador` · `/niveles-importar` · `/niveles-ajustar`\n"
             "*(requieren Gestionar servidor)*"
         ),
         inline=False
