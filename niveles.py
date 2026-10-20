@@ -571,7 +571,8 @@ class NivelesCog(commands.Cog):
         card.buttons(*tarjetas.page_controls("ranking", owner_id, page, pages, *extra))
         return card
 
-    async def _render_ranking(self, interaction: discord.Interaction, owner_id: int, page: Union[int, str]):
+    async def _render_ranking(self, interaction: discord.Interaction, owner_id: int, page: Union[int, str],
+                              arg: Optional[int] = None):
         if interaction.guild_id not in self.channels:
             return "📈 Los niveles no están activados en este servidor."
         return self.ranking_card(interaction.guild, owner_id, page)

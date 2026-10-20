@@ -1,19 +1,23 @@
 """
 Controles de música compartidos por los comandos de barra y los botones:
-permisos ("controlar solo desde la llamada"), acciones y las tarjetas de música
-("Sonando ahora" con botones, /current, /queue por páginas y lo que se añade con /play o /radio).
+permisos ("controlar solo desde la llamada"), conexión de voz, poner canciones en la cola
+(/play, /radio y las playlists) y las tarjetas de música ("Sonando ahora" con botones,
+/current, /queue por páginas y lo que se añade a la cola).
 """
 
+import asyncio
 import logging
 import math
 import time
-from typing import Dict, List, Optional, Union
+from typing import Awaitable, Callable, Dict, List, Optional, Sequence, Union
 
 import discord
 from discord.utils import escape_markdown
 
+import db
 import tarjetas
-from music import (music_manager, disconnect_player, MusicPlayer, Song, LOOP_LABELS,
+from config import MAX_QUEUE_SIZE
+from music import (music_manager, disconnect_player, play_next, MusicPlayer, Song, LOOP_LABELS,
                    LOOP_OFF, LOOP_CURRENT)
 
 logger = logging.getLogger(__name__)
@@ -23,6 +27,9 @@ QUEUE_PAGE_SIZE = 10
 
 # Última acción sobre la música de cada servidor («⏸️ Pausada por @x»): la tarjeta la enseña
 _last_action: Dict[int, str] = {}
+
+# Lo registra playlists.py: abre el menú para guardar en una playlist la canción que suena (botón ➕)
+on_save_song: Optional[Callable[[discord.Interaction, Song], Awaitable[None]]] = None
 
 
 # ==========================================
@@ -91,6 +98,88 @@ def join_error(member: discord.Member) -> Optional[str]:
     if busy and listeners:
         return f"🎧 Estoy poniendo música en {voice_client.channel.mention} para otras personas. Únete a ese canal."
     return None
+
+
+# ==========================================
+# COMPROBACIONES Y CONEXIÓN DE VOZ (comandos y botones)
+# ==========================================
+
+async def deny_wrong_channel(interaction: discord.Interaction) -> bool:
+    """
+    Comprueba si la interacción ocurre en el canal de comandos configurado con /setup.
+    Si NO está permitido, responde con un aviso efímero y devuelve True (denegar).
+    Si el servidor no ha hecho /setup, se permite en cualquier canal.
+    """
+    configured = db.get_music_channel(interaction.guild_id)
+    if configured is not None and interaction.channel_id != configured:
+        await interaction.response.send_message(
+            f"❌ Usa los comandos del bot en <#{configured}>.", ephemeral=True
+        )
+        return True
+    return False
+
+
+async def deny_control(interaction: discord.Interaction) -> bool:
+    """Comprobaciones de los comandos que controlan la música: canal de /setup y estar en la llamada."""
+    if await deny_wrong_channel(interaction):
+        return True
+    error = control_error(interaction.user)
+    if error:
+        await interaction.response.send_message(error, ephemeral=True)
+        return True
+    return False
+
+
+async def deny_join(interaction: discord.Interaction) -> bool:
+    """Comprobaciones previas de /play y /radio."""
+    if await deny_wrong_channel(interaction):
+        return True
+    if not interaction.user.voice or not interaction.user.voice.channel:
+        await interaction.response.send_message("❌ Entra a un canal de voz primero.", ephemeral=True)
+        return True
+    error = join_error(interaction.user)
+    if error:
+        await interaction.response.send_message(error, ephemeral=True)
+        return True
+    player = music_manager.peek(interaction.guild_id)
+    if player is not None and player.free_slots() == 0:
+        await interaction.response.send_message(
+            f"📭 La cola está llena ({MAX_QUEUE_SIZE} canciones). Usa `/clear` o espera a que avance.", ephemeral=True
+        )
+        return True
+    return False
+
+
+async def connect_voice(interaction: discord.Interaction) -> Optional[discord.VoiceClient]:
+    """Conecta (o mueve) al bot al canal de voz del usuario. Si falla, lo explica y devuelve None."""
+    voice = interaction.user.voice
+    if voice is None or voice.channel is None:
+        await interaction.followup.send("❌ Ya no estás en un canal de voz.")
+        return None
+    channel = voice.channel
+    perms = channel.permissions_for(interaction.guild.me)
+    if not (perms.connect and perms.speak):
+        await interaction.followup.send(f"❌ No tengo permiso para conectarme y hablar en {channel.mention}.")
+        return None
+
+    vc = interaction.guild.voice_client
+    try:
+        if vc is not None and not vc.is_connected():
+            await vc.disconnect(force=True)  # Conexión anterior colgada
+            vc = None
+        # Lógica de conexión y movimiento de canal
+        if vc is None:
+            vc = await channel.connect(self_deaf=True, timeout=20)
+        elif vc.channel != channel:
+            await vc.move_to(channel)
+    except asyncio.TimeoutError:
+        await interaction.followup.send("❌ No pude conectarme al canal de voz (tiempo agotado).")
+        return None
+    except Exception as e:
+        logger.exception("Error al conectar al canal de voz")
+        await interaction.followup.send(f"❌ Error de conexión: {e}")
+        return None
+    return vc
 
 
 # ==========================================
@@ -191,13 +280,16 @@ def build_card(player: MusicPlayer, song: Song) -> tarjetas.Card:
     card.separator()
     card.note("\n".join(filter(None, [_status(player, song), _last_action.get(player.guild.id)])))
     paused = _paused(player)
-    card.buttons(
+    buttons = [
         NowButton("pause", emoji="▶️" if paused else "⏸️", label="Seguir" if paused else "Pausa",
                   style=discord.ButtonStyle.success if paused else discord.ButtonStyle.secondary),
         NowButton("skip", emoji="⏭️", label="Saltar", style=discord.ButtonStyle.primary),
         NowButton("stop", emoji="⏹️", label="Parar", style=discord.ButtonStyle.danger),
         NowButton("loop", emoji="🔁", label="Bucle"),
-    )
+    ]
+    if not song.is_radio:
+        buttons.append(NowButton("save", emoji="➕", label="Guardar"))  # En una playlist
+    card.buttons(*buttons)
     return card
 
 
@@ -248,18 +340,19 @@ def queued_card(player: MusicPlayer, song: Song, position: int) -> tarjetas.Card
     return card
 
 
-def playlist_card(added: List[Song], left_out: int, requester: discord.abc.User) -> tarjetas.Card:
-    """Respuesta a /play con una playlist."""
+def playlist_card(added: List[Song], left_out: int, requester: discord.abc.User,
+                  title: str = "📂 Playlist añadida", notes: Sequence[str] = ()) -> tarjetas.Card:
+    """Respuesta cuando se ponen varias canciones a la vez (una playlist de YouTube o una del servidor)."""
     card = tarjetas.Card(tarjetas.QUEUE)
-    text = f"### 📂 Playlist añadida\n**{len(added)}** canciones"
+    text = f"### {title}\n**{len(added)}** {'canción' if len(added) == 1 else 'canciones'}"
     total = sum(song.duration or 0 for song in added if not song.is_radio)
     if total:
         text += f" · `{fmt_time(total)}`"
     card.section(text, added[0].thumbnail if added else None)
-    notes = [f"Pedida por {requester.mention}"]
+    lines = [*notes, f"Pedida por {requester.mention}"]
     if left_out:
-        notes.insert(0, f"La cola está llena: {left_out} no {'cupo' if left_out == 1 else 'cupieron'}.")
-    card.note("\n".join(notes))
+        lines.insert(0, f"La cola está llena: {left_out} no {'cupo' if left_out == 1 else 'cupieron'}.")
+    card.note("\n".join(lines))
     return card
 
 
@@ -296,7 +389,8 @@ def build_queue_card(player: MusicPlayer, owner_id: int, page: Union[int, str]) 
     return card
 
 
-async def render_queue_page(interaction: discord.Interaction, owner_id: int, page: Union[int, str]):
+async def render_queue_page(interaction: discord.Interaction, owner_id: int, page: Union[int, str],
+                            arg: Optional[int] = None):
     player = music_manager.peek(interaction.guild_id)
     if player is None or (not player.queue and player.current is None):
         return "📭 La cola está vacía."
@@ -376,7 +470,56 @@ async def refresh_card(guild: discord.Guild):
         pass
 
 
-class NowButton(discord.ui.DynamicItem[discord.ui.Button], template=r"reimbou:np:(?P<action>pause|skip|stop|loop)"):
+# ==========================================
+# PONER EN LA COLA (/play, /radio y playlists)
+# ==========================================
+
+async def enqueue_songs(interaction: discord.Interaction, songs: List[Song], *, title: Optional[str] = None,
+                        notes: Sequence[str] = ()):
+    """
+    Pone canciones en la cola de quien las pide (conectándose a su canal de voz) y responde.
+    La interacción tiene que estar ya diferida. Si es una sola canción y empieza a sonar ya, la
+    respuesta es su tarjeta «Sonando ahora» (un mensaje, no dos). Con `title` (una playlist del
+    servidor), la respuesta es siempre la tarjeta de playlist.
+    """
+    vc = await connect_voice(interaction)
+    if vc is None:
+        return
+    player = music_manager.get_player(interaction.guild)
+    player.text_channel = interaction.channel
+
+    added = []
+    for song in songs:
+        song.requester = interaction.user
+        if not player.add_song(song):
+            break
+        added.append(song)
+    if not added:
+        return await interaction.followup.send(f"📭 La cola está llena ({MAX_QUEUE_SIZE} canciones).")
+
+    starts_now = player.current is None and not vc.is_playing() and not vc.is_paused()
+    first_up = (title is None and starts_now and len(songs) == 1 and bool(player.queue)
+                and player.queue[0] is added[0])
+    if first_up:
+        card = build_card(player, added[0])
+    elif title is not None or len(songs) > 1:
+        card = playlist_card(added, len(songs) - len(added), interaction.user, **({"title": title} if title else {}),
+                             notes=notes)
+    else:
+        card = queued_card(player, added[0], len(player.queue))
+    message = await interaction.followup.send(view=card, allowed_mentions=NO_MENTIONS, wait=True)
+    if first_up:
+        adopt_card(player, added[0], message, interaction.channel)
+
+    # Arrancar el motor si estaba parado (después de responder, para que la respuesta salga antes que nada)
+    if starts_now:
+        await play_next(vc, player)
+    else:
+        await refresh_card(interaction.guild)  # La tarjeta dice cuántas hay en cola
+
+
+class NowButton(discord.ui.DynamicItem[discord.ui.Button],
+                template=r"reimbou:np:(?P<action>pause|skip|stop|loop|save)"):
     """
     Botones de la tarjeta "Sonando ahora". Son persistentes: si el bot se reinicia, los de
     tarjetas antiguas responden con un aviso en vez de fallar.
@@ -397,6 +540,8 @@ class NowButton(discord.ui.DynamicItem[discord.ui.Button], template=r"reimbou:np
         if card is None or interaction.message is None or interaction.message.id != card.id:
             await interaction.response.send_message("⌛ Estos botones ya no están activos.", ephemeral=True)
             return False
+        if self.action == "save":
+            return True  # Guardar la canción en una playlist no cambia la música: vale desde fuera de la llamada
         error = control_error(interaction.user)
         if error:
             await interaction.response.send_message(error, ephemeral=True)
@@ -436,3 +581,15 @@ class NowButton(discord.ui.DynamicItem[discord.ui.Button], template=r"reimbou:np
                 f"Bucle: **{LOOP_LABELS[player.loop_mode]}**", ephemeral=True
             )
         await tarjetas.update(interaction, build_card(player, player.current))
+
+    async def _save(self, interaction: discord.Interaction):
+        player = music_manager.peek(interaction.guild_id)
+        song = player.current if player else None
+        if song is None:
+            return await interaction.response.send_message("❌ No hay nada sonando.", ephemeral=True)
+        if song.is_radio:
+            return await interaction.response.send_message("📻 Las radios no se pueden guardar en una playlist.",
+                                                           ephemeral=True)
+        if on_save_song is None:
+            return await interaction.response.send_message("❌ Las playlists no están disponibles.", ephemeral=True)
+        await on_save_song(interaction, song)

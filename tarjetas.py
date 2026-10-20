@@ -39,8 +39,11 @@ command_ids: Dict[str, int] = {}
 
 
 def cmd(name: str) -> str:
-    """Mención de un comando: se ve como /nombre y al pulsarla se escribe el comando. Sin ID, texto normal."""
-    command_id = command_ids.get(name)
+    """
+    Mención de un comando: se ve como /nombre y al pulsarla se escribe el comando. Sin ID, texto normal.
+    Vale para subcomandos («playlist crear»: el ID es el del comando principal).
+    """
+    command_id = command_ids.get(name.split()[0])
     return f"</{name}:{command_id}>" if command_id else f"`/{name}`"
 
 
@@ -123,13 +126,14 @@ async def run_safely(interaction: discord.Interaction, handler: Callable[[discor
 
 
 # ==========================================
-# LISTADOS POR PÁGINAS (/ranking, /queue)
+# LISTADOS POR PÁGINAS (/ranking, /queue, playlists)
 # ==========================================
 
 # Lo que devuelve el dibujante de una página: la tarjeta, o un aviso que se manda solo a quien pulsó
 PageResult = Union[Card, str]
-# (interacción, dueño de la tarjeta, página o «yo» = la de quien pulsa) -> resultado
-PageRenderer = Callable[[discord.Interaction, int, Union[int, str]], Awaitable[PageResult]]
+# (interacción, dueño de la tarjeta, página o «yo» = la de quien pulsa, dato del listado) -> resultado.
+# El dato es opcional y dice qué se lista cuando hay varios del mismo tipo (p. ej. qué playlist).
+PageRenderer = Callable[[discord.Interaction, int, Union[int, str], Optional[int]], Awaitable[PageResult]]
 _renderers: Dict[str, PageRenderer] = {}
 
 
@@ -138,7 +142,8 @@ def register_pages(kind: str, renderer: PageRenderer):
     _renderers[kind] = renderer
 
 
-def page_controls(kind: str, owner_id: int, page: int, pages: int, *extra: ui.Item) -> List[ui.Item]:
+def page_controls(kind: str, owner_id: int, page: int, pages: int, *extra: ui.Item,
+                  arg: Optional[int] = None) -> List[ui.Item]:
     """
     Flechas para pasar de página (si hay más de una), el número de página y los botones extra.
     Todos son botones persistentes (el número también, desactivado): así discord.py no guarda
@@ -147,9 +152,9 @@ def page_controls(kind: str, owner_id: int, page: int, pages: int, *extra: ui.It
     items: List[ui.Item] = []
     if pages > 1:
         items += [
-            PageButton(kind, owner_id, page - 1, emoji="◀️", disabled=page <= 1),
-            PageButton(kind, owner_id, page, label=f"{page} / {pages}", disabled=True),
-            PageButton(kind, owner_id, page + 1, emoji="▶️", disabled=page >= pages),
+            PageButton(kind, owner_id, page - 1, emoji="◀️", disabled=page <= 1, arg=arg),
+            PageButton(kind, owner_id, page, label=f"{page} / {pages}", disabled=True, arg=arg),
+            PageButton(kind, owner_id, page + 1, emoji="▶️", disabled=page >= pages, arg=arg),
         ]
     return items + list(extra)
 
@@ -158,23 +163,27 @@ def clamp_page(page: Union[int, str], pages: int) -> int:
     return min(max(1, page if isinstance(page, int) else 1), pages)
 
 
-class PageButton(ui.DynamicItem[ui.Button], template=r"reimbou:pag:(?P<kind>[a-z]+):(?P<owner>\d+):(?P<page>\d+|yo)"):
+class PageButton(ui.DynamicItem[ui.Button],
+                 template=r"reimbou:pag:(?P<kind>[a-z]+)(?:-(?P<arg>\d+))?:(?P<owner>\d+):(?P<page>\d+|yo)"):
     """
     Botón de un listado por páginas. Quien pidió el listado mueve su mensaje; si pulsa otra persona,
     le abre su propia copia (que solo ve ella) en esa página, para que nadie le cambie la página a otro.
     """
 
     def __init__(self, kind: str, owner_id: int, page: Union[int, str], *, emoji=None, label: Optional[str] = None,
-                 disabled: bool = False, style: discord.ButtonStyle = discord.ButtonStyle.secondary):
+                 disabled: bool = False, style: discord.ButtonStyle = discord.ButtonStyle.secondary,
+                 arg: Optional[int] = None):
+        suffix = f"-{arg}" if arg is not None else ""
         super().__init__(ui.Button(emoji=emoji, label=label, style=style, disabled=disabled,
-                                   custom_id=f"reimbou:pag:{kind}:{owner_id}:{page}"))
-        self.kind, self.owner_id, self.page = kind, owner_id, page
+                                   custom_id=f"reimbou:pag:{kind}{suffix}:{owner_id}:{page}"))
+        self.kind, self.owner_id, self.page, self.arg = kind, owner_id, page, arg
 
     @classmethod
     async def from_custom_id(cls, interaction: discord.Interaction, item: ui.Button, match):
         page = match["page"]
         return cls(match["kind"], int(match["owner"]), page if page == "yo" else int(page),
-                   emoji=item.emoji, label=item.label, disabled=item.disabled, style=item.style)
+                   emoji=item.emoji, label=item.label, disabled=item.disabled, style=item.style,
+                   arg=int(match["arg"]) if match["arg"] else None)
 
     async def callback(self, interaction: discord.Interaction):
         await run_safely(interaction, self._turn_page)
@@ -183,7 +192,7 @@ class PageButton(ui.DynamicItem[ui.Button], template=r"reimbou:pag:(?P<kind>[a-z
         renderer = _renderers.get(self.kind)
         if renderer is None:
             return await interaction.response.send_message("⌛ Este botón ya no funciona.", ephemeral=True)
-        result = await renderer(interaction, interaction.user.id, self.page)
+        result = await renderer(interaction, interaction.user.id, self.page, self.arg)
         if isinstance(result, str):
             await interaction.response.send_message(result, ephemeral=True, allowed_mentions=NO_MENTIONS)
         elif interaction.user.id == self.owner_id:

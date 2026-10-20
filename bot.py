@@ -23,13 +23,15 @@ import db
 import tarjetas
 from notifier import send_deletion_log, send_bulk_delete_log
 from music import (
-    music_manager, search_youtube, play_next, disconnect_player, empty_channel_disconnect,
+    music_manager, search_youtube, disconnect_player, empty_channel_disconnect,
     log_dependency_status, SearchError, Song, LOOP_OFF, LOOP_CURRENT
 )
 from radios import RADIOS, RADIOS_BY_KEY, RADIO_ICON, fetch_now_playing
+from controls import deny_control, deny_join
 from palabra import PalabraCog
 from cuentas import CuentasCog
 from niveles import NivelesCog
+from playlists import PlaylistsCog
 
 # --- INICIALIZACIÓN ---
 logger = logging.getLogger(__name__)
@@ -67,6 +69,8 @@ class MusicBot(commands.Bot):
         await self.add_cog(CuentasCog(self))
         # Niveles: experiencia por mensajes y voz, avisos y roles de recompensa
         await self.add_cog(NivelesCog(self))
+        # Playlists: /playlist crear, añadir, quitar, ver, reproducir... y el botón ➕ de la tarjeta
+        await self.add_cog(PlaylistsCog(self))
         # Sincroniza los comandos de barra (Slash Commands) con Discord al iniciar.
         # Sus IDs permiten mencionarlos en los mensajes: se ven como /comando y se pueden pulsar.
         for command in await self.tree.sync():
@@ -296,88 +300,6 @@ async def on_raw_bulk_message_delete(payload: discord.RawBulkMessageDeleteEvent)
 
 
 # ==========================================
-# UTILIDADES DE COMANDOS
-# ==========================================
-
-async def deny_wrong_channel(interaction: discord.Interaction) -> bool:
-    """
-    Comprueba si la interacción ocurre en el canal de comandos configurado con /setup.
-    Si NO está permitido, responde con un aviso efímero y devuelve True (denegar).
-    Si el servidor no ha hecho /setup, se permite en cualquier canal.
-    """
-    configured = db.get_music_channel(interaction.guild_id)
-    if configured is not None and interaction.channel_id != configured:
-        await interaction.response.send_message(
-            f"❌ Usa los comandos del bot en <#{configured}>.", ephemeral=True
-        )
-        return True
-    return False
-
-
-async def deny_control(interaction: discord.Interaction) -> bool:
-    """Comprobaciones de los comandos que controlan la música: canal de /setup y estar en la llamada."""
-    if await deny_wrong_channel(interaction):
-        return True
-    error = controls.control_error(interaction.user)
-    if error:
-        await interaction.response.send_message(error, ephemeral=True)
-        return True
-    return False
-
-
-async def deny_join(interaction: discord.Interaction) -> bool:
-    """Comprobaciones previas de /play y /radio."""
-    if await deny_wrong_channel(interaction):
-        return True
-    if not interaction.user.voice or not interaction.user.voice.channel:
-        await interaction.response.send_message("❌ Entra a un canal de voz primero.", ephemeral=True)
-        return True
-    error = controls.join_error(interaction.user)
-    if error:
-        await interaction.response.send_message(error, ephemeral=True)
-        return True
-    player = music_manager.peek(interaction.guild_id)
-    if player is not None and player.free_slots() == 0:
-        await interaction.response.send_message(
-            f"📭 La cola está llena ({MAX_QUEUE_SIZE} canciones). Usa `/clear` o espera a que avance.", ephemeral=True
-        )
-        return True
-    return False
-
-
-async def connect_voice(interaction: discord.Interaction) -> Optional[discord.VoiceClient]:
-    """Conecta (o mueve) al bot al canal de voz del usuario. Si falla, lo explica y devuelve None."""
-    voice = interaction.user.voice
-    if voice is None or voice.channel is None:
-        await interaction.followup.send("❌ Ya no estás en un canal de voz.")
-        return None
-    channel = voice.channel
-    perms = channel.permissions_for(interaction.guild.me)
-    if not (perms.connect and perms.speak):
-        await interaction.followup.send(f"❌ No tengo permiso para conectarme y hablar en {channel.mention}.")
-        return None
-
-    vc = interaction.guild.voice_client
-    try:
-        if vc is not None and not vc.is_connected():
-            await vc.disconnect(force=True)  # Conexión anterior colgada
-            vc = None
-        # Lógica de conexión y movimiento de canal
-        if vc is None:
-            vc = await channel.connect(self_deaf=True, timeout=20)
-        elif vc.channel != channel:
-            await vc.move_to(channel)
-    except asyncio.TimeoutError:
-        await interaction.followup.send("❌ No pude conectarme al canal de voz (tiempo agotado).")
-        return None
-    except Exception as e:
-        logger.exception("Error al conectar al canal de voz")
-        await interaction.followup.send(f"❌ Error de conexión: {e}")
-        return None
-    return vc
-
-
-# ==========================================
 # COMANDO DE CONFIGURACIÓN
 # ==========================================
 
@@ -455,41 +377,7 @@ async def play(interaction: discord.Interaction, busqueda: str):
     if not songs:
         return await interaction.followup.send("❌ No encontré resultados.")
 
-    vc = await connect_voice(interaction)
-    if vc is None:
-        return
-    player = music_manager.get_player(interaction.guild)
-    player.text_channel = interaction.channel
-
-    # Inyección de metadatos del solicitante
-    added = []
-    for song in songs:
-        song.requester = interaction.user
-        if not player.add_song(song):
-            break
-        added.append(song)
-    if not added:
-        return await interaction.followup.send(f"📭 La cola está llena ({MAX_QUEUE_SIZE} canciones).")
-
-    starts_now = player.current is None and not vc.is_playing() and not vc.is_paused()
-    # Si lo pedido empieza ya, la respuesta es su tarjeta «Sonando ahora» (con botones): un mensaje, no dos
-    first_up = starts_now and len(songs) == 1 and bool(player.queue) and player.queue[0] is added[0]
-
-    if first_up:
-        card = controls.build_card(player, added[0])
-    elif len(songs) > 1:
-        card = controls.playlist_card(added, len(songs) - len(added), interaction.user)
-    else:
-        card = controls.queued_card(player, added[0], len(player.queue))
-    message = await interaction.followup.send(view=card, allowed_mentions=NO_MENTIONS, wait=True)
-    if first_up:
-        controls.adopt_card(player, added[0], message, interaction.channel)
-
-    # Iniciar motor si estaba en reposo (después de responder, para que la respuesta salga antes que nada)
-    if starts_now:
-        await play_next(vc, player)
-    else:
-        await controls.refresh_card(interaction.guild)  # La tarjeta dice cuántas hay en cola
+    await controls.enqueue_songs(interaction, songs)
 
 
 @bot.tree.command(name="radio", description="Sintoniza una radio española en directo")
@@ -502,40 +390,16 @@ async def radio(interaction: discord.Interaction, emisora: app_commands.Choice[s
         return
 
     await interaction.response.defer()
-    vc = await connect_voice(interaction)
-    if vc is None:
-        return
-
     station = RADIOS_BY_KEY[emisora.value]
-    player = music_manager.get_player(interaction.guild)
-    player.text_channel = interaction.channel
-
     # Song con `stream_url` y marcada como radio: music.py se salta yt-dlp y conecta directamente a la emisora.
     radio_song = Song(
         title=station.name,
         webpage_url=station.url,
         thumbnail=RADIO_ICON,
         stream_url=station.url,
-        requester=interaction.user,
         is_radio=True
     )
-    if not player.add_song(radio_song):
-        return await interaction.followup.send(f"📭 La cola está llena ({MAX_QUEUE_SIZE} canciones).")
-    starts_now = player.current is None and not vc.is_playing() and not vc.is_paused()
-    first_up = starts_now and player.queue[0] is radio_song
-
-    if first_up:
-        card = controls.build_card(player, radio_song)
-    else:
-        card = controls.queued_card(player, radio_song, len(player.queue))
-    message = await interaction.followup.send(view=card, allowed_mentions=NO_MENTIONS, wait=True)
-    if first_up:
-        controls.adopt_card(player, radio_song, message, interaction.channel)
-
-    if starts_now:
-        await play_next(vc, player)
-    else:
-        await controls.refresh_card(interaction.guild)
+    await controls.enqueue_songs(interaction, [radio_song])
 
 
 @bot.tree.command(name="current", description="Muestra lo que suena ahora (barra de progreso, o la canción de la radio)")
