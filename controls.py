@@ -293,6 +293,15 @@ def build_card(player: MusicPlayer, song: Song) -> tarjetas.Card:
     return card
 
 
+def build_log_card(song: Song) -> tarjetas.Card:
+    """Cómo se queda la tarjeta de una canción cuando ya ha sonado: como registro, en gris y sin botones."""
+    card = tarjetas.Card(tarjetas.PLAYED)
+    details = " · ".join(filter(None, [_length(song), _requested_by(song)]))
+    head = "📻 Sonó" if song.is_radio else "🎶 Sonó"
+    card.section(f"### {head}\n{_title_line(song)}\n{details}", song.thumbnail, song.title[:200])
+    return card
+
+
 def build_current_card(player: MusicPlayer, song: Song, live_title: Optional[str] = None) -> tarjetas.Card:
     """/current: barra de progreso en canciones; en radios, la canción que están emitiendo."""
     card = tarjetas.Card(tarjetas.RADIO if song.is_radio else tarjetas.MUSIC)
@@ -425,7 +434,7 @@ async def announce_now_playing(player: MusicPlayer, song: Song):
         return
     if song is player.announced_song and player.now_playing_message is not None:
         return  # Ya tiene tarjeta: la misma canción en bucle, o la respuesta a /play
-    await delete_now_playing(player)
+    await retire_now_playing(player)
     try:
         player.now_playing_message = await player.text_channel.send(
             view=build_card(player, song), allowed_mentions=NO_MENTIONS
@@ -446,17 +455,20 @@ async def announce_error(player: MusicPlayer, song: Optional[Song], reason: str)
         logger.warning(f"No pude avisar del error en el canal: {e}")
 
 
-async def delete_now_playing(player: MusicPlayer):
-    """Borra la tarjeta anterior (al cambiar de canción, al acabar la cola o al desconectar)."""
-    message = player.now_playing_message
+async def retire_now_playing(player: MusicPlayer):
+    """
+    Al cambiar de canción, acabarse la cola o desconectarse el bot, la tarjeta de la que sonaba
+    se queda en el canal como registro: «Sonó», sin botones y en gris.
+    """
+    message, song = player.now_playing_message, player.announced_song
     player.now_playing_message = None
     player.announced_song = None
     _last_action.pop(player.guild.id, None)
-    if message is not None:
+    if message is not None and song is not None:
         try:
-            await message.delete()
+            await message.edit(view=build_log_card(song), allowed_mentions=NO_MENTIONS)
         except discord.HTTPException:
-            pass  # Ya la había borrado alguien
+            pass  # La habían borrado
 
 
 async def refresh_card(guild: discord.Guild):

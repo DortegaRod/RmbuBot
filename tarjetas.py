@@ -26,6 +26,7 @@ MAX_TEXT = 4000  # Caracteres de texto entre todos los componentes de un mensaje
 MUSIC = discord.Colour.green()
 RADIO = discord.Colour.gold()
 QUEUE = discord.Colour.blue()
+PLAYED = discord.Colour.dark_grey()  # Canciones que ya han sonado (el registro del canal)
 LEVELS = discord.Colour.blurple()
 RANKING = discord.Colour.gold()
 WORDLE = discord.Colour.green()

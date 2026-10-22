@@ -60,7 +60,7 @@ class MusicBot(commands.Bot):
         # Ganchos del motor de música: tarjeta "Sonando ahora" y avisos en el canal de texto
         music_manager.on_track_start = controls.announce_now_playing
         music_manager.on_track_error = controls.announce_error
-        music_manager.on_player_end = controls.delete_now_playing
+        music_manager.on_player_end = controls.retire_now_playing
         # Botones y menús persistentes: siguen respondiendo tras un reinicio
         self.add_dynamic_items(controls.NowButton, tarjetas.PageButton, ayuda.HelpMenu)
         # Juego diario: /palabra, /palabra-stats, /setup-palabra y el anuncio de cada día
