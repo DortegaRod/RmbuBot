@@ -382,7 +382,7 @@ class NivelesCog(commands.Cog):
         old_level, new_level = level_for_xp(new_total - amount), level_for_xp(new_total)
         if new_level > old_level:
             roles = await self.sync_person(guild, member.id, new_level)
-            await self.announce_level_up(guild, member, new_level, roles)
+            await self.announce_level_up(guild, member, old_level, new_level, new_total, roles)
 
     async def sync_person(self, guild: discord.Guild, user_id: int, level: Optional[int] = None) -> List[discord.Role]:
         """
@@ -415,17 +415,55 @@ class NivelesCog(commands.Cog):
         """Al vincular cuentas se suma su experiencia: puede tocarle alguna recompensa (sin aviso)."""
         await self.sync_person(guild, principal_id)
 
-    async def announce_level_up(self, guild: discord.Guild, member: discord.Member, level: int,
-                                roles: List[discord.Role]):
+    async def _banner_url(self, member: discord.Member) -> Optional[str]:
+        """Banner del perfil (solo lo tiene quien paga Nitro). No viene con el miembro: hay que pedírselo a Discord."""
+        fetch_user = getattr(self.bot, "fetch_user", None)
+        if fetch_user is None:
+            return None
+        try:
+            user = await fetch_user(member.id)
+        except discord.HTTPException:
+            return None
+        return user.banner.replace(size=1024).url if user.banner else None
+
+    async def level_up_card(self, guild: discord.Guild, member: discord.Member, old_level: int, level: int,
+                            xp: int, roles: List[discord.Role]) -> tarjetas.Card:
+        """
+        Aviso de subida de nivel con el perfil: banner (si tiene), avatar, barra hasta el siguiente
+        nivel y puesto, en el color de su rol. Si trae un rol de recompensa, dorada y con el avatar en grande.
+        """
+        current, following = total_xp_for_level(level), total_xp_for_level(level + 1)
+        people = self._ranked_people(guild)
+        index = self._position_of(people, guild.id, member.id)
+        if roles:
+            names = " y ".join(f"**{escape_markdown(role.name)}**" for role in roles)
+            card = tarjetas.Card(tarjetas.RANKING)
+            card.text(f"## 🏆 ¡Nivel {level} y rol nuevo!\n{member.mention} consigue {names}")
+            card.gallery(member.display_avatar.replace(size=512).url, description=f"Avatar de {member.display_name}")
+        else:
+            card = tarjetas.Card(member.colour if member.colour.value else tarjetas.LEVELS)
+            banner = await self._banner_url(member)
+            if banner:
+                card.gallery(banner, description=f"Banner de {member.display_name}")
+            card.section(f"## 🎉 ¡Nivel {level}!\n{member.mention} sube del {old_level} al {level}",
+                         member.display_avatar.url, f"Avatar de {member.display_name}")
+        card.text(f"`{_progress_bar((xp - current) / (following - current))}` "
+                  f"{_fmt(xp - current)} / {_fmt(following - current)} hasta el nivel {level + 1}")
+        card.separator()
+        rank = f"🏅 Puesto #{index + 1} de {len(people)} · " if index is not None else ""
+        card.note(f"{rank}{_fmt(xp)} de experiencia")
+        return card
+
+    async def announce_level_up(self, guild: discord.Guild, member: discord.Member, old_level: int, level: int,
+                                xp: int, roles: List[discord.Role]):
         channel = guild.get_channel(self.channels.get(guild.id, 0))
         if channel is None:
             return
-        text = f"🎉 ¡{member.mention} ha subido al **nivel {level}**!"
-        for role in roles:
-            text += f"\n🏆 ¡y consigue el rol **{escape_markdown(role.name)}**!"
         try:
-            await channel.send(text, allowed_mentions=discord.AllowedMentions(everyone=False, roles=False,
-                                                                              users=[member]))
+            card = await self.level_up_card(guild, member, old_level, level, xp, roles)
+            # La mención va dentro de la tarjeta y avisa solo a esa persona
+            await channel.send(view=card, allowed_mentions=discord.AllowedMentions(everyone=False, roles=False,
+                                                                                   users=[member]))
         except discord.HTTPException as e:
             logger.warning(f"Niveles: no pude anunciar la subida de nivel en #{channel}: {e}")
 
@@ -520,7 +558,7 @@ class NivelesCog(commands.Cog):
         card.section(f"## 📈 {escape_markdown(member.display_name)}\n**Nivel {level}**{position}\n"
                      f"{_fmt(xp)} de experiencia", member.display_avatar.url, f"Avatar de {member.display_name}")
         card.text(f"`{_progress_bar((xp - current) / (following - current))}` "
-                  f"{_fmt(xp - current)} / {_fmt(following - current)} para el nivel {level + 1}")
+                  f"{_fmt(xp - current)} / {_fmt(following - current)} hasta el nivel {level + 1}")
         if len(group) > 1:
             card.note("🔗 Cuentas vinculadas: " + " · ".join(f"<@{uid}>" for uid in group))
         return card
