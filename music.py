@@ -483,6 +483,12 @@ def _is_active(voice_client: discord.VoiceClient, player: MusicPlayer) -> bool:
     return voice_client.is_connected() and music_manager.peek(player.guild.id) is player
 
 
+def _has_listeners(voice_client: discord.VoiceClient) -> bool:
+    """True si hay alguien (que no sea un bot) en el canal de voz del bot."""
+    channel = voice_client.channel
+    return channel is not None and any(not member.bot for member in channel.members)
+
+
 class _StderrTail:
     """
     Guarda lo último que FFmpeg escribe en su salida de errores, para poder explicar por qué
@@ -548,9 +554,13 @@ async def play_next(voice_client: discord.VoiceClient, player: MusicPlayer):
 
             song = player.get_next()
 
-            # Si no hay canciones, iniciamos temporizador de inactividad
+            # Se acabó la cola: sin nadie en el canal, el bot se va ya; con gente, se queda
             if song is None:
                 player.current = None
+                if not _has_listeners(voice_client):
+                    logger.info("⏹️ Se acabó la cola y no hay nadie en el canal de voz: desconectando.")
+                    await disconnect_player(player.guild)  # Avisa también del final (on_player_end)
+                    return
                 player.inactivity_task = asyncio.create_task(inactivity_disconnect(voice_client, player))
                 await music_manager.notify('on_player_end', player)
                 return
@@ -661,8 +671,9 @@ async def disconnect_player(guild: discord.Guild) -> bool:
 
 async def inactivity_disconnect(voice_client: discord.VoiceClient, player: MusicPlayer):
     """
-    Sin música desde hace un rato, el bot se va para liberar recursos... salvo que haya gente en su
-    canal de voz: entonces se queda, y se irá cuando el canal se vacíe (empty_channel_disconnect).
+    Red de seguridad tras acabarse la música con gente en el canal: si pasado un rato sigue sin sonar
+    nada y ya no queda nadie, el bot se va. Con gente, se queda; normalmente se irá antes, cuando el
+    canal se vacíe (empty_channel_disconnect).
     """
     try:
         await asyncio.sleep(INACTIVITY_TIMEOUT)
@@ -670,7 +681,7 @@ async def inactivity_disconnect(voice_client: discord.VoiceClient, player: Music
         return
     if not _is_active(voice_client, player) or voice_client.is_playing() or voice_client.is_paused():
         return
-    if any(not member.bot for member in voice_client.channel.members):
+    if _has_listeners(voice_client):
         logger.info("💤 Sin música, pero hay gente en el canal de voz: el bot se queda.")
         return
     logger.info("💤 Sin música desde hace rato, desconectando para ahorrar recursos.")

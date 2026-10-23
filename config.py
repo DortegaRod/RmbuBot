@@ -61,7 +61,7 @@ DB_PATH = Path(__file__).parent / "mensajes.db"
 # Music Configuration
 MAX_QUEUE_SIZE = _env_int("MAX_QUEUE_SIZE", 100)
 DEFAULT_VOLUME = _env_float("DEFAULT_VOLUME", 0.5)
-INACTIVITY_TIMEOUT = _env_int("INACTIVITY_TIMEOUT", 300)      # Cola vacía y nadie en el canal: 5 minutos (con gente, se queda)
+INACTIVITY_TIMEOUT = _env_int("INACTIVITY_TIMEOUT", 300)      # Red de seguridad: sin música ni nadie en el canal (al acabarse la cola sin nadie, se va ya)
 EMPTY_CHANNEL_TIMEOUT = _env_int("EMPTY_CHANNEL_TIMEOUT", 60)  # Nadie en el canal de voz: 1 minuto
 
 # Validaciones
