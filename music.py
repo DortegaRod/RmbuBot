@@ -660,14 +660,21 @@ async def disconnect_player(guild: discord.Guild) -> bool:
 
 
 async def inactivity_disconnect(voice_client: discord.VoiceClient, player: MusicPlayer):
-    """Desconecta al bot tras un periodo de inactividad para liberar recursos."""
+    """
+    Sin música desde hace un rato, el bot se va para liberar recursos... salvo que haya gente en su
+    canal de voz: entonces se queda, y se irá cuando el canal se vacíe (empty_channel_disconnect).
+    """
     try:
         await asyncio.sleep(INACTIVITY_TIMEOUT)
     except asyncio.CancelledError:
         return
-    if _is_active(voice_client, player) and not voice_client.is_playing() and not voice_client.is_paused():
-        logger.info("💤 Sin música desde hace rato, desconectando para ahorrar recursos.")
-        await disconnect_player(player.guild)
+    if not _is_active(voice_client, player) or voice_client.is_playing() or voice_client.is_paused():
+        return
+    if any(not member.bot for member in voice_client.channel.members):
+        logger.info("💤 Sin música, pero hay gente en el canal de voz: el bot se queda.")
+        return
+    logger.info("💤 Sin música desde hace rato, desconectando para ahorrar recursos.")
+    await disconnect_player(player.guild)
 
 
 async def empty_channel_disconnect(voice_client: discord.VoiceClient, player: MusicPlayer,
