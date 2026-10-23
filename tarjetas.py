@@ -40,8 +40,11 @@ command_ids: Dict[str, int] = {}
 
 
 def cmd(name: str) -> str:
-    """Mención de un comando: se ve como /nombre y al pulsarla se escribe el comando. Sin ID, texto normal."""
-    command_id = command_ids.get(name)
+    """
+    Mención de un comando: se ve como /nombre y al pulsarla se escribe el comando. Sin ID, texto normal.
+    Vale para subcomandos («evento crear»: el ID es el del comando principal).
+    """
+    command_id = command_ids.get(name.split()[0])
     return f"</{name}:{command_id}>" if command_id else f"`/{name}`"
 
 

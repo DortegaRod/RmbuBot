@@ -53,6 +53,16 @@ def _niveles() -> str:
     )
 
 
+def _eventos() -> str:
+    return (
+        "## 📅 Eventos\n"
+        "Los eventos salen en su canal con botones ✅ Voy · 💭 Puede · ❌ No voy. Puede votar cualquiera, "
+        "y pulsar otra vez tu voto lo quita.\n"
+        "-# Si tienes el rol del evento, te llega un DM al crearlo. Si votas Voy o Puede, te avisamos por DM "
+        "cuando empiece o si se cancela."
+    )
+
+
 def _admin() -> str:
     return (
         "## ⚙️ Administración\n"
@@ -64,6 +74,9 @@ def _admin() -> str:
         f"{cmd('niveles-ajustar')} — Pon a alguien una experiencia o un nivel exactos\n"
         f"{cmd('niveles-importar')} — Importa la clasificación de Amari\n"
         f"{cmd('vincular-cuentas')} — Vincula cuentas de una persona sin pedirle confirmación\n"
+        f"{cmd('setup-eventos')} — Canal donde salen los eventos\n"
+        f"{cmd('evento crear')} — Evento para un rol: tarjeta para votar y DM a los del rol\n"
+        f"{cmd('evento empezar')} · {cmd('evento cancelar')} — Empezarlo antes de hora o cancelarlo\n"
         "-# Necesitan el permiso «Gestionar servidor»."
     )
 
@@ -73,6 +86,7 @@ SECTIONS: Dict[str, Tuple[str, str, str, Callable[[], str]]] = {
     "musica": ("🎵", "Música", "YouTube y radios, con botones en cada canción", _music),
     "palabra": ("🟩", "Palabra del día", "El Wordle en español, con rachas", _palabra),
     "niveles": ("📈", "Niveles", "Experiencia por escribir y estar en voz", _niveles),
+    "eventos": ("📅", "Eventos", "Vota si vas y te avisamos al empezar", _eventos),
     "admin": ("⚙️", "Administración", "Configuración del bot (solo admins)", _admin),
 }
 
