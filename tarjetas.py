@@ -70,11 +70,6 @@ class Card(ui.LayoutView):
                                      accessory=ui.Thumbnail(thumbnail, description=description)))
         return self
 
-    def gallery(self, *urls: str, description: Optional[str] = None) -> "Card":
-        """Imágenes grandes, a lo ancho de la tarjeta (un banner, un avatar en grande...)."""
-        self.box.add_item(ui.MediaGallery(*(discord.MediaGalleryItem(url, description=description) for url in urls)))
-        return self
-
     def separator(self, *, visible: bool = True, large: bool = False) -> "Card":
         spacing = discord.SeparatorSpacing.large if large else discord.SeparatorSpacing.small
         self.box.add_item(ui.Separator(visible=visible, spacing=spacing))
