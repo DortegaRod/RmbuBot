@@ -4,8 +4,8 @@ Eventos: un admin crea un evento (para un rol, p. ej. @SCP 🐊, si quiere) y el
 - La tarjeta del evento sale en el canal de eventos (/setup-eventos), con botones para votar:
   ✅ Voy · 💭 Puede · ❌ No voy. Puede votar cualquiera; pulsar otra vez tu voto lo quita.
 - Si tiene rol, a todos los que lo tienen les llega un DM con un botón que lleva a la tarjeta.
-- A su hora, el bot menciona al rol en el canal, cierra la votación con el resumen y manda un DM
-  a quienes votaron Voy o Puede. Con /evento empezar se puede adelantar.
+- A su hora, el bot cierra la votación con el resumen y manda un DM a quienes votaron Voy o Puede
+  (en el canal no se anuncia ni se menciona al rol). Con /evento empezar se puede adelantar.
 - Al empezar, el bot crea también el evento de Discord y lo inicia en el acto (sale en directo en el
   icono del servidor). Con canal de voz, lleva a ese canal y Discord lo termina cuando se vacía;
   sin canal, dura DISCORD_EVENT_HOURS.
@@ -468,8 +468,8 @@ class EventosCog(commands.Cog):
         except discord.HTTPException as e:
             logger.warning(f"Eventos: no pude actualizar la tarjeta de «{event.titulo}»: {e}")
 
-    async def _notice(self, guild: discord.Guild, event: Event, text: str, role: Optional[discord.Role] = None):
-        """Aviso en el canal del evento, como respuesta a su tarjeta (mencionando al rol si se pasa)."""
+    async def _notice(self, guild: discord.Guild, event: Event, text: str):
+        """Aviso en el canal del evento, como respuesta a su tarjeta (sin mencionar a nadie)."""
         channel = guild.get_channel(event.channel_id)
         if channel is None:
             return
@@ -477,9 +477,8 @@ class EventosCog(commands.Cog):
         if event.message_id is not None:
             reference = discord.MessageReference(message_id=event.message_id, channel_id=event.channel_id,
                                                  guild_id=event.guild_id, fail_if_not_exists=False)
-        mentions = discord.AllowedMentions(everyone=False, users=False, roles=[role] if role else False)
         try:
-            await channel.send(text, reference=reference, mention_author=False, allowed_mentions=mentions)
+            await channel.send(text, reference=reference, mention_author=False, allowed_mentions=NO_MENTIONS)
         except discord.HTTPException as e:
             logger.warning(f"Eventos: no pude avisar en #{channel} de «{event.titulo}»: {e}")
 
@@ -490,8 +489,9 @@ class EventosCog(commands.Cog):
 
     async def start_event(self, event: Event, *, quiet: bool = False, now: Optional[int] = None) -> bool:
         """
-        Empieza el evento: cierra la votación, menciona al rol en el canal y avisa por DM a quienes
-        votaron Voy o Puede. Con `quiet` (el bot estaba apagado a la hora) solo cierra la votación.
+        Empieza el evento: cierra la votación (la tarjeta pasa a «Empezó»), crea el evento de Discord
+        y avisa por DM a quienes votaron Voy o Puede. En el canal no se anuncia ni se menciona al rol:
+        se enteran por el DM. Con `quiet` (el bot estaba apagado a la hora) solo cierra la votación.
         """
         if not set_state(event.id, "empezado", inicio=now):
             return False  # Ya había empezado o se había cancelado
@@ -505,10 +505,6 @@ class EventosCog(commands.Cog):
             return True
         role = guild.get_role(event.role_id) if event.role_id else None
         voice = guild.get_channel(event.voice_channel_id) if event.voice_channel_id else None
-        text = f"{icon_for(role)} ¡Empieza **{escape_markdown(event.titulo)}**!"
-        text += f" {role.mention}" if role is not None else ""
-        text += f"\n🔊 {voice.mention}" if voice is not None else ""
-        await self._notice(guild, event, text, role)
         await self._discord_event(guild, event, voice)
         members, votes = self._voters(guild, event)
         await send_dms(members, lambda member: start_dm(event, guild, role, votes[member.id]))
@@ -597,7 +593,7 @@ class EventosCog(commands.Cog):
 
     @evento.command(name="crear", description="Crea un evento: tarjeta para votar y aviso a los del rol (si eliges uno)")
     @app_commands.describe(titulo="Nombre del evento", cuando="Día y hora: «sábado 22:00», «mañana 21:30» o «25/10 22:00»",
-                           rol="Rol al que va dirigido: les llega un DM y se le menciona al empezar (opcional)",
+                           rol="Rol al que va dirigido: les llega un DM al crearlo (opcional)",
                            canal_voz="Canal de voz del evento: Discord lo termina cuando se vacía (opcional)",
                            descripcion="Detalles del evento (opcional)")
     async def crear(self, interaction: discord.Interaction, titulo: app_commands.Range[str, 1, 80], cuando: str,
@@ -645,8 +641,8 @@ class EventosCog(commands.Cog):
             lines.append(f"📨 DM a **{sent}** de {len(members)} con el rol {rol.mention}"
                          + (f" ({failed} {'tiene' if failed == 1 else 'tienen'} los DM cerrados)." if failed else "."))
         else:
-            lines.append("Sin rol: no se ha mandado ningún DM y al empezar no se mencionará a nadie "
-                         "(a quienes voten Voy o Puede sí les llegará su DM).")
+            lines.append("Sin rol: no se ha mandado ningún DM (a quienes voten Voy o Puede sí les llegará el suyo "
+                         "al empezar).")
         if not (guild.me.guild_permissions.create_events or guild.me.guild_permissions.manage_events):
             lines.append("⚠️ Para que al empezar salga el evento de Discord (y el aviso en el icono del servidor), "
                          "dale al bot el permiso «Crear eventos».")
@@ -655,11 +651,6 @@ class EventosCog(commands.Cog):
             if not (voice_perms.view_channel and voice_perms.connect):
                 lines.append(f"⚠️ El bot necesita ver {canal_voz.mention} y poder conectarse para crear ahí el evento "
                              f"de Discord.")
-        perms = channel.permissions_for(guild.me)
-        if rol is not None and not (rol.mentionable or perms.mention_everyone):
-            lines.append(f"⚠️ Al empezar, la mención a {rol.mention} **no avisaría**: en Ajustes del servidor → Roles, "
-                         f"activa «Permitir que cualquiera @mencione este rol» (o dale al bot «Mencionar @everyone, "
-                         f"@here y todos los roles»).")
         await interaction.followup.send("\n".join(lines), ephemeral=True, allowed_mentions=NO_MENTIONS)
 
     @crear.autocomplete("cuando")
@@ -673,7 +664,7 @@ class EventosCog(commands.Cog):
             return [app_commands.Choice(name=f"⚠️ Ya ha pasado: {describe(moment)}", value=current[:100])]
         return [app_commands.Choice(name=f"🗓️ {describe(moment)}", value=moment.isoformat(timespec="minutes"))]
 
-    @evento.command(name="empezar", description="Empieza ya un evento: menciona al rol y avisa a los que van")
+    @evento.command(name="empezar", description="Empieza ya un evento: avisa por DM a los que van")
     @app_commands.describe(evento="El evento")
     async def empezar(self, interaction: discord.Interaction, evento: str):
         if not _is_admin(interaction):
