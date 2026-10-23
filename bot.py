@@ -73,8 +73,11 @@ class MusicBot(commands.Bot):
         await self.add_cog(EventosCog(self))
         # Sincroniza los comandos de barra (Slash Commands) con Discord al iniciar.
         # Sus IDs permiten mencionarlos en los mensajes: se ven como /comando y se pueden pulsar.
-        for command in await self.tree.sync():
+        synced = await self.tree.sync()
+        for command in synced:
             tarjetas.command_ids[command.name] = command.id
+        logger.info(f"✅ {len(synced)} comandos de barra registrados en Discord: "
+                    + ", ".join(sorted(command.name for command in synced)))
 
 
 bot = MusicBot()
