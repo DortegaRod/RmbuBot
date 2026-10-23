@@ -59,7 +59,7 @@ def _eventos() -> str:
         "Los eventos salen en su canal con botones ✅ Voy · 💭 Puede · ❌ No voy. Puede votar cualquiera, "
         "y pulsar otra vez tu voto lo quita.\n"
         "-# Si tienes el rol del evento, te llega un DM al crearlo. Si votas Voy o Puede, te avisamos por DM "
-        "cuando empiece o si se cancela."
+        "cuando empiece o si se cancela. Mientras dura, sale como evento de Discord en el servidor."
     )
 
 
@@ -75,7 +75,8 @@ def _admin() -> str:
         f"{cmd('niveles-importar')} — Importa la clasificación de Amari\n"
         f"{cmd('vincular-cuentas')} — Vincula cuentas de una persona sin pedirle confirmación\n"
         f"{cmd('setup-eventos')} — Canal donde salen los eventos\n"
-        f"{cmd('evento crear')} — Evento para un rol: tarjeta para votar y DM a los del rol\n"
+        f"{cmd('evento crear')} — Evento con tarjeta para votar; con rol, DM a los del rol; con canal de voz, "
+        f"Discord lo termina cuando se vacía\n"
         f"{cmd('evento empezar')} · {cmd('evento cancelar')} — Empezarlo antes de hora o cancelarlo\n"
         "-# Necesitan el permiso «Gestionar servidor»."
     )
