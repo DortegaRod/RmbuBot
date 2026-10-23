@@ -28,24 +28,8 @@ def _music() -> str:
         f"{cmd('clear')} — Vacía la cola (la que suena sigue)\n"
         f"{cmd('volume')} — Volumen de 0 a 100\n"
         f"{cmd('stop')} — Para la música y saca al bot\n"
-        "-# Cada canción sale en una tarjeta con botones para pausar, saltar, parar, poner bucle y guardarla "
-        "en una playlist.\n"
+        "-# Cada canción sale en una tarjeta con botones para pausar, saltar, parar y poner bucle.\n"
         "-# Para controlar la música tienes que estar en su canal de voz (los moderadores, desde cualquier sitio)."
-    )
-
-
-def _playlists() -> str:
-    return (
-        "## 🎶 Playlists\n"
-        f"{cmd('playlist crear')} — Crea una playlist: solo tuya, o colaborativa para que cualquiera la cambie\n"
-        f"{cmd('playlist añadir')} — Añade una canción, o una playlist de YouTube entera con su enlace\n"
-        f"{cmd('playlist quitar')} — Quita una canción\n"
-        f"{cmd('playlist ver')} — Sus canciones, con botones para ponerla\n"
-        f"{cmd('playlist reproducir')} — La pone al final de la cola, en orden o aleatoria\n"
-        f"{cmd('playlist lista')} — Las playlists del servidor, o las de alguien\n"
-        f"{cmd('playlist editar')} · {cmd('playlist borrar')} — Cámbiale el nombre, hazla colaborativa o bórrala\n"
-        "-# Con ➕ en la tarjeta «Sonando ahora» guardas la canción que suena. "
-        "Hasta 10 playlists por persona y 100 canciones en cada una."
     )
 
 
@@ -87,7 +71,6 @@ def _admin() -> str:
 # Sección -> (emoji, nombre, descripción en el menú, texto)
 SECTIONS: Dict[str, Tuple[str, str, str, Callable[[], str]]] = {
     "musica": ("🎵", "Música", "YouTube y radios, con botones en cada canción", _music),
-    "playlists": ("🎶", "Playlists", "Las tuyas y las del servidor", _playlists),
     "palabra": ("🟩", "Palabra del día", "El Wordle en español, con rachas", _palabra),
     "niveles": ("📈", "Niveles", "Experiencia por escribir y estar en voz", _niveles),
     "admin": ("⚙️", "Administración", "Configuración del bot (solo admins)", _admin),

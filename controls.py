@@ -1,7 +1,7 @@
 """
 Controles de música compartidos por los comandos de barra y los botones:
 permisos ("controlar solo desde la llamada"), conexión de voz, poner canciones en la cola
-(/play, /radio y las playlists) y las tarjetas de música ("Sonando ahora" con botones,
+(/play y /radio) y las tarjetas de música ("Sonando ahora" con botones,
 /current, /queue por páginas y lo que se añade a la cola).
 """
 
@@ -9,7 +9,7 @@ import asyncio
 import logging
 import math
 import time
-from typing import Awaitable, Callable, Dict, List, Optional, Sequence, Union
+from typing import Dict, List, Optional, Union
 
 import discord
 from discord.utils import escape_markdown
@@ -27,9 +27,6 @@ QUEUE_PAGE_SIZE = 10
 
 # Última acción sobre la música de cada servidor («⏸️ Pausada por @x»): la tarjeta la enseña
 _last_action: Dict[int, str] = {}
-
-# Lo registra playlists.py: abre el menú para guardar en una playlist la canción que suena (botón ➕)
-on_save_song: Optional[Callable[[discord.Interaction, Song], Awaitable[None]]] = None
 
 
 # ==========================================
@@ -280,16 +277,13 @@ def build_card(player: MusicPlayer, song: Song) -> tarjetas.Card:
     card.separator()
     card.note("\n".join(filter(None, [_status(player, song), _last_action.get(player.guild.id)])))
     paused = _paused(player)
-    buttons = [
+    card.buttons(
         NowButton("pause", emoji="▶️" if paused else "⏸️", label="Seguir" if paused else "Pausa",
                   style=discord.ButtonStyle.success if paused else discord.ButtonStyle.secondary),
         NowButton("skip", emoji="⏭️", label="Saltar", style=discord.ButtonStyle.primary),
         NowButton("stop", emoji="⏹️", label="Parar", style=discord.ButtonStyle.danger),
         NowButton("loop", emoji="🔁", label="Bucle"),
-    ]
-    if not song.is_radio:
-        buttons.append(NowButton("save", emoji="➕", label="Guardar"))  # En una playlist
-    card.buttons(*buttons)
+    )
     return card
 
 
@@ -349,16 +343,15 @@ def queued_card(player: MusicPlayer, song: Song, position: int) -> tarjetas.Card
     return card
 
 
-def playlist_card(added: List[Song], left_out: int, requester: discord.abc.User,
-                  title: str = "📂 Playlist añadida", notes: Sequence[str] = ()) -> tarjetas.Card:
-    """Respuesta cuando se ponen varias canciones a la vez (una playlist de YouTube o una del servidor)."""
+def playlist_card(added: List[Song], left_out: int, requester: discord.abc.User) -> tarjetas.Card:
+    """Respuesta a /play con una playlist de YouTube."""
     card = tarjetas.Card(tarjetas.QUEUE)
-    text = f"### {title}\n**{len(added)}** {'canción' if len(added) == 1 else 'canciones'}"
+    text = f"### 📂 Playlist añadida\n**{len(added)}** {'canción' if len(added) == 1 else 'canciones'}"
     total = sum(song.duration or 0 for song in added if not song.is_radio)
     if total:
         text += f" · `{fmt_time(total)}`"
     card.section(text, added[0].thumbnail if added else None)
-    lines = [*notes, f"Pedida por {requester.mention}"]
+    lines = [f"Pedida por {requester.mention}"]
     if left_out:
         lines.insert(0, f"La cola está llena: {left_out} no {'cupo' if left_out == 1 else 'cupieron'}.")
     card.note("\n".join(lines))
@@ -398,8 +391,7 @@ def build_queue_card(player: MusicPlayer, owner_id: int, page: Union[int, str]) 
     return card
 
 
-async def render_queue_page(interaction: discord.Interaction, owner_id: int, page: Union[int, str],
-                            arg: Optional[int] = None):
+async def render_queue_page(interaction: discord.Interaction, owner_id: int, page: Union[int, str]):
     player = music_manager.peek(interaction.guild_id)
     if player is None or (not player.queue and player.current is None):
         return "📭 La cola está vacía."
@@ -483,16 +475,14 @@ async def refresh_card(guild: discord.Guild):
 
 
 # ==========================================
-# PONER EN LA COLA (/play, /radio y playlists)
+# PONER EN LA COLA (/play y /radio)
 # ==========================================
 
-async def enqueue_songs(interaction: discord.Interaction, songs: List[Song], *, title: Optional[str] = None,
-                        notes: Sequence[str] = ()):
+async def enqueue_songs(interaction: discord.Interaction, songs: List[Song]):
     """
     Pone canciones en la cola de quien las pide (conectándose a su canal de voz) y responde.
     La interacción tiene que estar ya diferida. Si es una sola canción y empieza a sonar ya, la
-    respuesta es su tarjeta «Sonando ahora» (un mensaje, no dos). Con `title` (una playlist del
-    servidor), la respuesta es siempre la tarjeta de playlist.
+    respuesta es su tarjeta «Sonando ahora» (un mensaje, no dos).
     """
     vc = await connect_voice(interaction)
     if vc is None:
@@ -510,13 +500,11 @@ async def enqueue_songs(interaction: discord.Interaction, songs: List[Song], *, 
         return await interaction.followup.send(f"📭 La cola está llena ({MAX_QUEUE_SIZE} canciones).")
 
     starts_now = player.current is None and not vc.is_playing() and not vc.is_paused()
-    first_up = (title is None and starts_now and len(songs) == 1 and bool(player.queue)
-                and player.queue[0] is added[0])
+    first_up = starts_now and len(songs) == 1 and bool(player.queue) and player.queue[0] is added[0]
     if first_up:
         card = build_card(player, added[0])
-    elif title is not None or len(songs) > 1:
-        card = playlist_card(added, len(songs) - len(added), interaction.user, **({"title": title} if title else {}),
-                             notes=notes)
+    elif len(songs) > 1:
+        card = playlist_card(added, len(songs) - len(added), interaction.user)
     else:
         card = queued_card(player, added[0], len(player.queue))
     message = await interaction.followup.send(view=card, allowed_mentions=NO_MENTIONS, wait=True)
@@ -530,8 +518,7 @@ async def enqueue_songs(interaction: discord.Interaction, songs: List[Song], *, 
         await refresh_card(interaction.guild)  # La tarjeta dice cuántas hay en cola
 
 
-class NowButton(discord.ui.DynamicItem[discord.ui.Button],
-                template=r"reimbou:np:(?P<action>pause|skip|stop|loop|save)"):
+class NowButton(discord.ui.DynamicItem[discord.ui.Button], template=r"reimbou:np:(?P<action>pause|skip|stop|loop)"):
     """
     Botones de la tarjeta "Sonando ahora". Son persistentes: si el bot se reinicia, los de
     tarjetas antiguas responden con un aviso en vez de fallar.
@@ -552,8 +539,6 @@ class NowButton(discord.ui.DynamicItem[discord.ui.Button],
         if card is None or interaction.message is None or interaction.message.id != card.id:
             await interaction.response.send_message("⌛ Estos botones ya no están activos.", ephemeral=True)
             return False
-        if self.action == "save":
-            return True  # Guardar la canción en una playlist no cambia la música: vale desde fuera de la llamada
         error = control_error(interaction.user)
         if error:
             await interaction.response.send_message(error, ephemeral=True)
@@ -594,14 +579,3 @@ class NowButton(discord.ui.DynamicItem[discord.ui.Button],
             )
         await tarjetas.update(interaction, build_card(player, player.current))
 
-    async def _save(self, interaction: discord.Interaction):
-        player = music_manager.peek(interaction.guild_id)
-        song = player.current if player else None
-        if song is None:
-            return await interaction.response.send_message("❌ No hay nada sonando.", ephemeral=True)
-        if song.is_radio:
-            return await interaction.response.send_message("📻 Las radios no se pueden guardar en una playlist.",
-                                                           ephemeral=True)
-        if on_save_song is None:
-            return await interaction.response.send_message("❌ Las playlists no están disponibles.", ephemeral=True)
-        await on_save_song(interaction, song)
