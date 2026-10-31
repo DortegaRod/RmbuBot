@@ -4,8 +4,9 @@ Eventos: un admin crea un evento (para un rol, p. ej. @SCP 🐊, si quiere) y el
 - La tarjeta del evento sale en el canal de eventos (/setup-eventos), con botones para votar:
   ✅ Voy · 💭 Puede · ❌ No voy. Puede votar cualquiera; pulsar otra vez tu voto lo quita.
 - Si tiene rol, a todos los que lo tienen les llega un DM con un botón que lleva a la tarjeta.
-- A su hora, el bot cierra la votación con el resumen y manda un DM a quienes votaron Voy o Puede
-  (en el canal no se anuncia ni se menciona al rol). Con /evento empezar se puede adelantar.
+- A su hora, el bot cierra la votación con el resumen y manda un DM a quienes votaron Voy o Puede:
+  el título y un botón que lleva al canal de voz (o a la tarjeta, si no tiene). En el canal no se
+  anuncia ni se menciona al rol. Con /evento empezar se puede adelantar.
 - Al empezar, el bot crea también el evento de Discord y lo inicia en el acto (sale en directo en el
   icono del servidor). Con canal de voz, lleva a ese canal y Discord lo termina cuando se vacía;
   sin canal, dura DISCORD_EVENT_HOURS.
@@ -340,15 +341,19 @@ def invite_dm(event: Event, guild: discord.Guild, role: discord.Role) -> tarjeta
     return _dm_card(role.colour if role.colour.value else tarjetas.INFO, text, note, event.jump_url, "Votar en el servidor")
 
 
-def start_dm(event: Event, guild: discord.Guild, role: Optional[discord.Role], vote: str) -> tarjetas.Card:
-    """DM a quien votó Voy o Puede cuando empieza el evento."""
-    greeting = ("Dijiste que venías: te estamos esperando." if vote == "si"
-                else "Dijiste que a lo mejor te apuntabas: aún estás a tiempo.")
-    text = f"### {icon_for(role)} ¡Empieza {escape_markdown(event.titulo)}!\n{greeting}"
+def start_dm(event: Event, role: Optional[discord.Role]) -> dict:
+    """
+    DM a quien votó Voy o Puede cuando empieza el evento: solo el título y un botón que lleva al canal
+    de voz (o, si no tiene, a la tarjeta del evento). Que llegue a su hora ya dice que ha empezado.
+    """
     if event.voice_channel_id:
         url = f"https://discord.com/channels/{event.guild_id}/{event.voice_channel_id}"
-        return _dm_card(tarjetas.SUCCESS, text, f"En {escape_markdown(guild.name)}.", url, "Entrar al canal de voz")
-    return _dm_card(tarjetas.SUCCESS, text, f"En {escape_markdown(guild.name)}.", event.jump_url, "Ir al servidor")
+        button = ui.Button(style=discord.ButtonStyle.link, url=url, label="Entrar al canal de voz", emoji="🔊")
+    else:
+        button = ui.Button(style=discord.ButtonStyle.link, url=event.jump_url, label="Ir al servidor", emoji="📅")
+    view = ui.View(timeout=None)
+    view.add_item(button)
+    return {"content": f"{icon_for(role)} **{escape_markdown(event.titulo)}**", "view": view}
 
 
 def cancel_dm(event: Event, guild: discord.Guild) -> tarjetas.Card:
@@ -358,12 +363,17 @@ def cancel_dm(event: Event, guild: discord.Guild) -> tarjetas.Card:
     return _dm_card(tarjetas.DANGER, text, f"En {escape_markdown(guild.name)}.", event.jump_url, "Ver el evento")
 
 
-async def send_dms(members: List[discord.Member], build: Callable[[discord.Member], tarjetas.Card]) -> Tuple[int, int]:
-    """Manda un DM a cada uno, con una pausa entre ellos. Devuelve (enviados, fallidos: DM cerrados)."""
+async def send_dms(members: List[discord.Member],
+                   build: Callable[[discord.Member], Union[tarjetas.Card, dict]]) -> Tuple[int, int]:
+    """
+    Manda un DM a cada uno (una tarjeta, o lo que diga el dict: texto y botones), con una pausa entre
+    ellos. Devuelve (enviados, fallidos: DM cerrados).
+    """
     sent = failed = 0
     for member in members:
+        payload = build(member)
         try:
-            await member.send(view=build(member))
+            await member.send(**(payload if isinstance(payload, dict) else {"view": payload}))
             sent += 1
         except discord.HTTPException:
             failed += 1
@@ -506,8 +516,8 @@ class EventosCog(commands.Cog):
         role = guild.get_role(event.role_id) if event.role_id else None
         voice = guild.get_channel(event.voice_channel_id) if event.voice_channel_id else None
         await self._discord_event(guild, event, voice)
-        members, votes = self._voters(guild, event)
-        await send_dms(members, lambda member: start_dm(event, guild, role, votes[member.id]))
+        members, _ = self._voters(guild, event)
+        await send_dms(members, lambda member: start_dm(event, role))
         return True
 
     async def _discord_event(self, guild: discord.Guild, event: Event, voice: Optional[discord.abc.GuildChannel]):
