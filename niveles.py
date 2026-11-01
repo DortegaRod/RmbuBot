@@ -1,10 +1,12 @@
 """
 Niveles: experiencia por escribir y por estar en voz, con roles de recompensa.
-Sustituye al sistema de Amari con sus mismos ajustes, para que los niveles importados no cambien:
+Sustituye al sistema de Amari con sus mismos ajustes, para que los niveles importados no cambien,
+salvo la voz, que va más despacio:
 
 - Mensajes: 1 de experiencia por mensaje (por el multiplicador del canal), como mucho uno cada 10 s.
-- Voz: 5 de experiencia por cada 5 minutos en un canal de voz. Cuenta silenciado y estando solo;
-  no cuenta ensordecido ni en el canal AFK.
+- Voz: 1 de experiencia por cada 5 minutos en un canal de voz. Cuenta silenciado y estando solo;
+  no cuenta ensordecido ni en el canal AFK. Los ajustes de Amari decían 5, pero en la práctica
+  Amari no la daba, y con 5 aquí se subía mucho más rápido que allí.
 - Nivel N con 20·N² − 40·N + 55 de experiencia total (la fórmula de Amari).
 - Roles de recompensa acumulativos y aviso de subida de nivel en el canal configurado.
 - Todo va por persona: las cuentas vinculadas (cuentas.py) suman su experiencia y comparten
@@ -33,10 +35,10 @@ import tarjetas
 
 logger = logging.getLogger(__name__)
 
-# Ajustes copiados de Amari en el servidor de Reimbou
+# Ajustes copiados de Amari en el servidor de Reimbou (menos la experiencia de voz)
 MESSAGE_XP = 1          # Experiencia por mensaje
 MESSAGE_COOLDOWN = 10   # Segundos mínimos entre mensajes que dan experiencia
-VOICE_RATE = 1          # Amari da VOICE_RATE × VOICE_INTERVAL cada intervalo en voz
+VOICE_XP = 1            # Experiencia por cada VOICE_INTERVAL minutos en voz (Amari decía 5, pero no la daba)
 VOICE_INTERVAL = 5      # Minutos
 VOICE_MIN_USERS = 1     # Personas mínimas en el canal (1 = también estando solo)
 GLOBAL_MULTIPLIER = 1
@@ -497,7 +499,7 @@ class NivelesCog(commands.Cog):
                         minutes = self.voice_minutes.get(key, 0) + 1
                         if minutes >= VOICE_INTERVAL:
                             minutes = 0
-                            await self.award(guild, member, VOICE_RATE * VOICE_INTERVAL)
+                            await self.award(guild, member, VOICE_XP)
                         self.voice_minutes[key] = minutes
                 # Quien sale de voz pierde los minutos que no llegaron a un intervalo completo
                 for key in [k for k in self.voice_minutes if k[0] == guild.id and k not in present]:
@@ -654,7 +656,7 @@ class NivelesCog(commands.Cog):
         card = tarjetas.Card(tarjetas.LEVELS)
         card.text(f"## ⚙️ Configuración de niveles\n{state}")
         card.text(f"**Experiencia:** {MESSAGE_XP} por mensaje (uno cada {MESSAGE_COOLDOWN} s) · "
-                  f"{VOICE_RATE * VOICE_INTERVAL} cada {VOICE_INTERVAL} min en voz")
+                  f"{VOICE_XP} cada {VOICE_INTERVAL} min en voz")
         card.note("En voz no cuenta estar ensordecido ni el canal AFK.")
         card.separator()
         card.text("**Multiplicadores**\n" + ("\n".join(f"<#{c}> ×{v}" for c, v in multipliers.items()) or "Ninguno"))
