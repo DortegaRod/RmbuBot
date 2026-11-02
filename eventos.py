@@ -1,4 +1,8 @@
 """
+APAGADO desde el 2026-11-02: bot.py ya no carga este módulo; lo sustituye eventos_voz.py. Se conserva por
+si se quiere recuperar: hay que volver a añadir EventosCog en bot.py y la sección «eventos» de /help
+(ayuda.py), que está en el historial de git.
+
 Eventos: un admin crea un evento (para un rol, p. ej. @SCP 🐊, si quiere) y el bot se encarga del resto.
 
 - La tarjeta del evento sale en el canal de eventos (/setup-eventos), con botones para votar:

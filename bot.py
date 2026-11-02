@@ -31,7 +31,7 @@ from controls import deny_control, deny_join
 from palabra import PalabraCog
 from cuentas import CuentasCog
 from niveles import NivelesCog
-from eventos import EventosCog
+from eventos_voz import EventosVozCog
 
 # --- INICIALIZACIÓN ---
 logger = logging.getLogger(__name__)
@@ -69,8 +69,9 @@ class MusicBot(commands.Bot):
         await self.add_cog(CuentasCog(self))
         # Niveles: experiencia por mensajes y voz, avisos y roles de recompensa
         await self.add_cog(NivelesCog(self))
-        # Eventos: /setup-eventos, /evento crear · empezar · cancelar, votos y avisos por DM
-        await self.add_cog(EventosCog(self))
+        # Eventos de voz: /evento-voz; evento de Discord automático al entrar alguien con el rol en su canal
+        # (los eventos con tarjeta y votos, eventos.py, están apagados: no se cargan)
+        await self.add_cog(EventosVozCog(self))
         # Sincroniza los comandos de barra (Slash Commands) con Discord al iniciar.
         # Sus IDs permiten mencionarlos en los mensajes: se ven como /comando y se pueden pulsar.
         synced = await self.tree.sync()
