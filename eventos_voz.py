@@ -4,8 +4,8 @@ evento de Discord en ese canal, con el nombre del rol, y lo inicia en el acto (s
 icono del servidor). No escribe ni menciona a nadie.
 
 - Un admin elige las parejas canal-rol con /evento-voz (un rol por canal).
-- El evento dura mientras haya alguien en el canal, tenga el rol o no. Cuando el canal lleva
-  EMPTY_GRACE vacío, el bot lo termina (el margen es por si alguien solo se ha caído un momento).
+- El evento dura mientras haya alguien en el canal, tenga el rol o no. En cuanto se queda vacío, el
+  bot lo termina, sin esperar.
 - Si el bot se reinicia, recupera los eventos que dejó en directo y repasa los canales.
 
 Sustituye a los eventos con tarjeta y votos (eventos.py), que se conservan apagados.
@@ -27,7 +27,6 @@ import tarjetas
 
 logger = logging.getLogger(__name__)
 
-EMPTY_GRACE = 3 * 60                # Segundos que el canal tiene que estar vacío para terminar el evento
 START_DELAY = timedelta(minutes=1)  # Discord no deja crearlo con la hora ya pasada: se crea a un minuto y se inicia ya
 NO_MENTIONS = discord.AllowedMentions.none()
 
@@ -79,16 +78,11 @@ class EventosVozCog(commands.Cog):
         self.bot = bot
         self.pairs: Dict[int, Dict[int, int]] = defaultdict(dict)       # Servidor -> {canal de voz: rol}
         self.live: Dict[int, discord.ScheduledEvent] = {}                # Canal de voz -> su evento en directo
-        self.closing: Dict[int, asyncio.Task] = {}                       # Canal de voz -> espera para terminarlo
-        self.locks: Dict[int, asyncio.Lock] = defaultdict(asyncio.Lock)  # Por canal: que no se creen dos a la vez
+        self.locks: Dict[int, asyncio.Lock] = defaultdict(asyncio.Lock)  # Por canal: crear y terminar, de uno en uno
 
     async def cog_load(self):
         init_db()
         self.pairs = load_pairs()
-
-    async def cog_unload(self):
-        for task in self.closing.values():
-            task.cancel()
 
     # ---------- El evento de cada canal ----------
 
@@ -106,73 +100,53 @@ class EventosVozCog(commands.Cog):
     async def check_channel(self, guild: discord.Guild, channel_id: int):
         """
         Pone al día un canal: si hay alguien con su rol y no hay evento, lo crea; si se ha quedado vacío
-        con el evento en marcha, lo terminará pasado EMPTY_GRACE.
+        con el evento en marcha, lo termina.
         """
         channel = guild.get_channel(channel_id)
         if channel is None:
             return
-        humans = _humans(channel)
-        if not humans:
-            if self.live_event(guild, channel_id) is not None:
-                self._close_later(guild, channel_id)
-            return
-        self._cancel_closing(channel_id)
-        role = guild.get_role(self.pairs.get(guild.id, {}).get(channel_id, 0))
-        if role is not None and any(role in member.roles for member in humans):
-            await self.start_event(guild, channel, role)
-
-    async def start_event(self, guild: discord.Guild, channel: discord.VoiceChannel, role: discord.Role):
-        async with self.locks[channel.id]:  # Si entran dos a la vez, el segundo ya lo encuentra creado
-            if self.live_event(guild, channel.id) is not None:
-                return
-            reason = f"Ha entrado alguien con el rol {role.name}"
-            try:
-                event = await guild.create_scheduled_event(
-                    name=role.name[:100], start_time=discord.utils.utcnow() + START_DELAY,
-                    entity_type=discord.EntityType.voice, channel=channel,
-                    privacy_level=discord.PrivacyLevel.guild_only, reason=reason
-                )
-            except discord.HTTPException as e:
-                logger.warning(f"Eventos de voz: no pude crear el evento de #{channel} "
-                               f"(¿le falta al bot el permiso «Crear eventos»?): {e}")
-                return
-            try:
-                event = await event.start(reason=reason)
-            except discord.HTTPException as e:
-                logger.warning(f"Eventos de voz: creé el evento de #{channel} pero no pude iniciarlo: {e}")
-                try:
-                    await event.delete(reason="No se pudo iniciar")
-                except discord.HTTPException:
-                    pass
-                return
-            self.live[channel.id] = event
-        if not _humans(channel):  # Se fue mientras se creaba
-            self._close_later(guild, channel.id)
-
-    def _close_later(self, guild: discord.Guild, channel_id: int):
-        if channel_id not in self.closing:
-            self.closing[channel_id] = asyncio.create_task(self._close_if_still_empty(guild, channel_id))
-
-    def _cancel_closing(self, channel_id: int):
-        task = self.closing.pop(channel_id, None)
-        if task is not None:
-            task.cancel()
-
-    async def _close_if_still_empty(self, guild: discord.Guild, channel_id: int):
-        """Termina el evento si el canal sigue vacío pasado EMPTY_GRACE."""
-        try:
-            await asyncio.sleep(EMPTY_GRACE)
-            channel = guild.get_channel(channel_id)
+        # De uno en uno y mirando quién hay ya dentro del candado: si entran dos a la vez, el segundo ya
+        # encuentra el evento creado; si alguien se va mientras se crea, después se termina
+        async with self.locks[channel_id]:
+            humans = _humans(channel)
             event = self.live_event(guild, channel_id)
-            if event is None or (channel is not None and _humans(channel)):
+            if not humans:
+                if event is not None:
+                    await self._end_event(channel, event)
                 return
-            del self.live[channel_id]
+            role = guild.get_role(self.pairs.get(guild.id, {}).get(channel_id, 0))
+            if event is None and role is not None and any(role in member.roles for member in humans):
+                await self._start_event(guild, channel, role)
+
+    async def _start_event(self, guild: discord.Guild, channel: discord.VoiceChannel, role: discord.Role):
+        reason = f"Ha entrado alguien con el rol {role.name}"
+        try:
+            event = await guild.create_scheduled_event(
+                name=role.name[:100], start_time=discord.utils.utcnow() + START_DELAY,
+                entity_type=discord.EntityType.voice, channel=channel,
+                privacy_level=discord.PrivacyLevel.guild_only, reason=reason
+            )
+        except discord.HTTPException as e:
+            logger.warning(f"Eventos de voz: no pude crear el evento de #{channel} "
+                           f"(¿le falta al bot el permiso «Crear eventos»?): {e}")
+            return
+        try:
+            event = await event.start(reason=reason)
+        except discord.HTTPException as e:
+            logger.warning(f"Eventos de voz: creé el evento de #{channel} pero no pude iniciarlo: {e}")
+            try:
+                await event.delete(reason="No se pudo iniciar")
+            except discord.HTTPException:
+                pass
+            return
+        self.live[channel.id] = event
+
+    async def _end_event(self, channel: discord.VoiceChannel, event: discord.ScheduledEvent):
+        del self.live[channel.id]
+        try:
             await event.end(reason="El canal se ha quedado vacío")
         except discord.HTTPException as e:
-            logger.warning(f"Eventos de voz: no pude terminar el evento del canal {channel_id}: {e}")
-        finally:
-            if self.closing.get(channel_id) is asyncio.current_task():
-                del self.closing[channel_id]
+            logger.warning(f"Eventos de voz: no pude terminar el evento de #{channel}: {e}")
 
     # ---------- Lo que pasa en el servidor ----------
 
@@ -222,8 +196,8 @@ class EventosVozCog(commands.Cog):
         lines = [f"🔊 <#{channel_id}> → <@&{role_id}>" for channel_id, role_id in pairs.items()]
         card = tarjetas.Card(tarjetas.INFO)
         card.text("### 🔊 Eventos de voz\n" + ("\n".join(lines) or "Ningún canal todavía."))
-        card.note(f"Al entrar alguien con el rol, se crea un evento de Discord con su nombre; se termina cuando "
-                  f"el canal lleva {EMPTY_GRACE // 60} minutos vacío. Añade uno con {tarjetas.cmd('evento-voz')}.")
+        card.note(f"Al entrar alguien con el rol, se crea un evento de Discord con su nombre; se termina en "
+                  f"cuanto el canal se vacía. Añade uno con {tarjetas.cmd('evento-voz')}.")
         return card
 
     @app_commands.command(name="evento-voz",
@@ -259,8 +233,7 @@ class EventosVozCog(commands.Cog):
         save_pair(guild.id, canal.id, rol.id)
         self.pairs[guild.id][canal.id] = rol.id
         lines = [f"✅ Cuando alguien con {rol.mention} entre en {canal.mention}, se creará el evento "
-                 f"«{escape_markdown(rol.name)}», sin avisar a nadie. Se termina cuando el canal lleva "
-                 f"{EMPTY_GRACE // 60} minutos vacío."]
+                 f"«{escape_markdown(rol.name)}», sin avisar a nadie. Se termina en cuanto el canal se vacía."]
         if not (guild.me.guild_permissions.create_events or guild.me.guild_permissions.manage_events):
             lines.append("⚠️ Dale al bot el permiso «Crear eventos», o no podrá crearlo.")
         voice_perms = canal.permissions_for(guild.me)
