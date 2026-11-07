@@ -3,7 +3,7 @@ Inventario y forja: el inventario enseña las monedas de cada uno; en la forja (
 1 de plata y 100 de plata, 1 de oro (monedas.py), y también se puede fundir una moneda y recuperar 100 de la
 anterior.
 
-- Las dos son tarjetas que solo ve quien las abre: con /craftear o con los botones 🎒 Inventario y ⚒️ Forja
+- Las dos son tarjetas que solo ve quien las abre: con /craftear o con los botones 💰 Inventario y ⚒️ Forja
   de un perfil. Desde una se pasa a la otra en la misma tarjeta.
 - Las de otra persona (desde su perfil) solo se miran: no llevan botones para craftear ni fundir.
 - Cada receta tiene ×1, ×10, ×100, «Todo» y «✏️ Cantidad», que pide el número exacto en una ventanita.
@@ -29,6 +29,7 @@ FORGE_COLOUR = discord.Colour.dark_orange()
 INVENTORY_COLOUR = discord.Colour.dark_gold()
 AMOUNTS = (1, 10, 100)  # Botones de cantidad fija de cada receta (además de «Todo» y «✏️ Cantidad»)
 MAX_TYPED = 9_999_999   # Lo más que se puede escribir en «✏️ Cantidad»
+BAG = "💰"            # Icono del inventario y de la bolsa (emoji normal de Discord)
 
 
 def _amount_buttons(action: str, coin_name: str, possible: int, emoji: Optional[str] = None) -> list:
@@ -48,7 +49,7 @@ def forge_card(purse: monedas.Purse, owner_id: int, result: Optional[str] = None
     """
     card = tarjetas.Card(FORGE_COLOUR)
     title = f"## ⚒️ Forja de {escape_markdown(viewer_of)}" if viewer_of else "## ⚒️ Forja"
-    card.text(f"{title}\n{tarjetas.emoji('bolsa')} {monedas.format_purse(purse)}")
+    card.text(f"{title}\n{BAG} {monedas.format_purse(purse)}")
     if result:
         card.text(result)
     can = "Puede" if viewer_of else "Puedes"
@@ -79,7 +80,7 @@ def inventory_card(purse: monedas.Purse, owner_id: int, viewer_of: Optional[str]
     lines = [f"{tarjetas.emoji(name)} {name.capitalize()}: **{monedas.fmt_number(purse.get(name))}**"
              for name in monedas.COIN_NAMES]
     title = f"Inventario de {escape_markdown(viewer_of)}" if viewer_of else "Inventario"
-    card.text(f"## {tarjetas.emoji('bolsa')} {title}\n" + "\n".join(lines))
+    card.text(f"## {BAG} {title}\n" + "\n".join(lines))
     whose = "es el de otra persona" if viewer_of else "solo tú ves tu inventario"
     card.note(f"Vale {monedas.coin('cobre', purse.value)} en total · {whose}.")
     card.separator()
@@ -177,13 +178,13 @@ class ForgeButton(ui.DynamicItem[ui.Button],
 
 class OpenInventoryButton(ui.DynamicItem[ui.Button], template=r"reimbou:bolsa:abrir(?::(?P<owner>\d+))?"):
     """
-    El botón 🎒 Inventario (de un perfil y de la forja): abre el inventario de su dueño; si no es quien lo
+    El botón 💰 Inventario (de un perfil y de la forja): abre el inventario de su dueño; si no es quien lo
     pulsa, solo para mirar. Los botones de antes no llevan dueño: abren el de quien los pulsa.
     """
 
     def __init__(self, owner_id: Optional[int] = None):
         suffix = f":{owner_id}" if owner_id else ""
-        super().__init__(ui.Button(label="Inventario", emoji=tarjetas.emoji("bolsa"),
+        super().__init__(ui.Button(label="Inventario", emoji=BAG,
                                    custom_id=f"reimbou:bolsa:abrir{suffix}"))
         self.owner_id = owner_id
 

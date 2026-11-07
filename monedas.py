@@ -27,7 +27,6 @@ LOWER = {"plata": "cobre", "oro": "plata"}  # Con qué se craftea cada moneda (y
 tarjetas.register_emoji("oro", ("gold", "oro"), "🟡")
 tarjetas.register_emoji("plata", ("silver", "plata"), "⚪")
 tarjetas.register_emoji("cobre", ("copper", "cobre"), "🟤")
-tarjetas.register_emoji("bolsa", ("pouch", "bolsa"), "🎒")  # Icono de la bolsa (emoji propio; si falta, 🎒)
 
 
 @dataclass

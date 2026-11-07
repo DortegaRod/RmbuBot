@@ -4,7 +4,7 @@ Perfil de personaje (/perfil): título, nivel, puesto y desde cuándo está la p
 - El título es un rol. Los admins marcan con /titulos qué roles lo son, y sale el más alto (en la lista
   de roles del servidor) de esos que tenga la persona. Sin ninguno, el perfil no lleva título.
 - El nivel y el puesto salen si los niveles están activados en el servidor (niveles.py).
-- Las monedas no salen en el perfil: los botones 🎒 Inventario y ⚒️ Forja abren las tarjetas privadas de
+- Las monedas no salen en el perfil: los botones 💰 Inventario y ⚒️ Forja abren las tarjetas privadas de
   forja.py del dueño del perfil. Si las abre otra persona, solo puede mirarlas.
 - Las cuentas vinculadas comparten nivel y monedas; la fecha es la de la que entró antes al servidor.
 """
