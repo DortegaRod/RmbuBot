@@ -116,10 +116,8 @@ class PerfilCog(commands.Cog):
             card.separator()
             # El nivel como subtítulo: es lo que más se mira, que se vea grande
             level = niveles.level_for_xp(xp)
-            reward = monedas.coin("cobre", monedas.level_rewards(level, level + 1))
             card.text(f"### 📈 Nivel {level}{position}\n{niveles.level_progress(xp)}\n"
-                      f"-# ✨ {monedas.fmt_number(xp)} de experiencia en total{tarjetas.FIELD_SEP}"
-                      f"🎁 Nivel {level + 1}: +{reward}")
+                      f"-# ✨ {monedas.fmt_number(xp)} de experiencia en total")
 
         # Las monedas, aparte: el inventario y la forja de esta persona se abren en privado (solo ella las usa)
         card.separator()

@@ -3,15 +3,13 @@ Monedas: cobre, plata y oro, al estilo de un RPG.
 
 - Cada moneda se guarda aparte. Lo que se gana es siempre cobre: la plata y el oro se craftean en la
   forja (forja.py), 100 de cobre por 1 de plata y 100 de plata por 1 de oro, y se pueden volver a fundir.
-- Se ganan subiendo de nivel: llegar al nivel N da N × 100 de cobre. Se guarda hasta qué nivel se le ha
-  pagado a cada persona, así que ningún nivel se paga dos veces (aunque un admin le baje y le vuelva a
-  subir el nivel, o se vinculen cuentas). Los niveles que ya tenía cada uno se pagan al arrancar el bot
-  (niveles.py).
+- Subir de nivel NO da monedas: así nadie empieza la economía ya muy avanzado. Todo el mundo empieza a 0
+  (el 2026-11-07 se puso a todos a 0 una vez; ver RESETS). Cómo se ganan está por decidir.
 - Todo va por persona: las cuentas vinculadas (cuentas.py) suman sus monedas.
 """
 
 from dataclasses import dataclass
-from typing import Iterable, List, Optional, Tuple
+from typing import List, Optional, Tuple
 
 import db
 import tarjetas
@@ -19,9 +17,10 @@ import tarjetas
 RATE = 100            # Monedas de un tipo que hacen falta para craftear una del siguiente
 PLATA = RATE          # Lo que vale una de plata, en cobre
 ORO = RATE * PLATA    # Lo que vale una de oro, en cobre
-LEVEL_REWARD = PLATA  # Llegar al nivel N da N veces esto, en cobre
 COIN_NAMES = ("oro", "plata", "cobre")  # De más a menos valor
 LOWER = {"plata": "cobre", "oro": "plata"}  # Con qué se craftea cada moneda (y en qué se funde)
+# Reinicios de la economía (todos a 0), cada uno una sola vez. Para otro, se añade un nombre nuevo
+RESETS = ("sin-monedas-por-nivel",)
 
 # Emojis propios de las monedas (se buscan por nombre al conectarse; si faltan, puntos de colores)
 tarjetas.register_emoji("oro", ("gold", "oro"), "🟡")
@@ -61,13 +60,6 @@ def format_purse(purse: Purse) -> str:
     return tarjetas.ITEM_SEP.join(parts) or coin("cobre", 0)
 
 
-def level_rewards(from_level: int, to_level: int) -> int:
-    """Cobre que dan los niveles de from_level + 1 a to_level (el nivel N da N × 100)."""
-    def total(level: int) -> int:
-        return LEVEL_REWARD * level * (level + 1) // 2
-    return max(0, total(to_level) - total(from_level))
-
-
 # ==========================================
 # BASE DE DATOS
 # ==========================================
@@ -87,49 +79,17 @@ def init_db():
         for name in ("plata", "oro"):
             if name not in columns:
                 conn.execute(f"ALTER TABLE monedas ADD COLUMN {name} INTEGER NOT NULL DEFAULT 0")
+        # Reinicios de la economía: cada uno se hace una sola vez (se apunta cuál se ha hecho)
+        conn.execute("CREATE TABLE IF NOT EXISTS monedas_reinicios (nombre TEXT PRIMARY KEY)")
+        done = {row[0] for row in conn.execute("SELECT nombre FROM monedas_reinicios")}
+        for name in RESETS:
+            if name not in done:
+                conn.execute("DELETE FROM monedas")
+                conn.execute("INSERT INTO monedas_reinicios (nombre) VALUES (?)", (name,))
 
 
 def _placeholders(group: List[int]) -> str:
     return ",".join("?" * len(group))
-
-
-def _pay(conn, guild_id: int, group: List[int], level: int) -> int:
-    """
-    Paga en cobre los niveles de la persona que aún no tenía pagados y apunta hasta cuál se le ha pagado.
-    Lo cobra su cuenta principal (group[0]). Devuelve lo pagado.
-    """
-    paid = conn.execute(f"SELECT COALESCE(MAX(nivel_pagado), 0) FROM monedas WHERE guild_id = ? "
-                        f"AND user_id IN ({_placeholders(group)})", (guild_id, *group)).fetchone()[0]
-    amount = level_rewards(paid, level)
-    if amount:
-        conn.execute(
-            "INSERT INTO monedas (guild_id, user_id, cobre, nivel_pagado) VALUES (?, ?, ?, ?) "
-            "ON CONFLICT(guild_id, user_id) DO UPDATE SET cobre = cobre + excluded.cobre, "
-            "nivel_pagado = excluded.nivel_pagado",
-            (guild_id, group[0], amount, level)
-        )
-    return amount
-
-
-def pay_levels(guild_id: int, group: List[int], level: int) -> int:
-    """Paga a una persona los niveles hasta `level` que no tuviera pagados. Devuelve lo pagado, en cobre."""
-    with db.get_db_connection() as conn:
-        # Bloquea la base de datos desde la lectura: dos subidas a la vez no pagan el mismo nivel dos veces
-        conn.execute("BEGIN IMMEDIATE")
-        return _pay(conn, guild_id, group, level)
-
-
-def pay_levels_many(guild_id: int, people: Iterable[Tuple[List[int], int]]) -> Tuple[int, int]:
-    """Lo mismo para muchas personas en una sola transacción. Devuelve (personas pagadas, cobre en total)."""
-    paid_people = total = 0
-    with db.get_db_connection() as conn:
-        conn.execute("BEGIN IMMEDIATE")
-        for group, level in people:
-            amount = _pay(conn, guild_id, group, level)
-            if amount:
-                paid_people += 1
-                total += amount
-    return paid_people, total
 
 
 def _purse(conn, guild_id: int, group: List[int]) -> Purse:

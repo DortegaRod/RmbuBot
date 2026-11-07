@@ -51,7 +51,7 @@ def _gremio() -> str:
         f"{cmd('ranking')} — La clasificación del gremio\n"
         f"{cmd('vincular')} — Une otra cuenta tuya: vuestra experiencia se suma\n"
         f"{cmd('desvincular')} — Separa una cuenta vinculada\n"
-        "-# Se gana experiencia escribiendo y estando en voz. Llegar al nivel N da N × 100 de cobre.\n"
+        "-# Se gana experiencia escribiendo y estando en voz.\n"
         f"-# En la forja, {tarjetas.emoji('cobre')} 100 de cobre hacen {tarjetas.emoji('plata')} 1 de plata y "
         f"{tarjetas.emoji('plata')} 100 de plata, {tarjetas.emoji('oro')} 1 de oro."
     )
