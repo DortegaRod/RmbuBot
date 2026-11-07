@@ -3,7 +3,7 @@
 discord.py[voice]>=2.7.1
 # YouTube: [default] incluye yt-dlp-ejs, que junto con un motor JavaScript (Deno) resuelve los retos de YouTube.
 # Actualízalo a menudo: YouTube cambia constantemente.
-yt-dlp[default]>=2026.8.19
+yt-dlp[default]>=2026.10.26
 aiohttp>=3.9
 python-dotenv>=1.0.1
 # Zona horaria de España (la palabra del día cambia a medianoche) aunque el sistema no traiga la suya

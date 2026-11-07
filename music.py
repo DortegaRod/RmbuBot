@@ -35,6 +35,8 @@ LOOP_LABELS = {LOOP_OFF: "No", LOOP_CURRENT: "🔂 Canción", LOOP_QUEUE: "🔁 
 STREAM_URL_TTL = 60 * 60       # Las URLs de audio de YouTube caducan: se re-extraen pasada 1 hora
 MAX_CONSECUTIVE_FAILURES = 5   # Canciones seguidas que no cargan antes de dejar de intentarlo
 FAST_FAIL_SECONDS = 2.0        # Si una pista "termina" antes de esto, FFmpeg no pudo reproducirla
+AVAILABLE_MARGIN = 0.5         # Segundos de más al esperar a que YouTube deje descargar el audio (available_at)
+MAX_AVAILABLE_WAIT = 30        # Como mucho se espera esto (si YouTube pidiera más, se intenta igualmente)
 SEARCH_CANDIDATES = 5          # Resultados de YouTube entre los que se elige la versión de una canción de Spotify
 DURATION_TOLERANCE = 10        # Segundos de diferencia con la duración de Spotify que se dan por buenos
 
@@ -125,6 +127,7 @@ class Song:
     duration: Optional[float] = None  # Duración en segundos (None en radios/directos)
     stream_fetched_at: Optional[float] = None  # Cuándo se extrajo stream_url (reloj monotónico)
     user_agent: Optional[str] = None  # User-Agent con el que yt-dlp obtuvo la URL (FFmpeg debe usar el mismo)
+    available_at: Optional[float] = None  # Hora (Unix) desde la que YouTube deja descargar stream_url (antes, 403)
     retried: bool = False  # Ya se reintentó una vez tras cortarse nada más empezar
     search_query: Optional[str] = None  # Canciones de Spotify: se buscan en YouTube justo antes de sonar
 
@@ -364,6 +367,7 @@ def _apply_stream_info(song: Song, info: dict):
     """Copia a la canción la URL de audio elegida por yt-dlp (y lo que FFmpeg necesita para usarla)."""
     url = info.get('url')
     headers = info.get('http_headers') or {}
+    available_at = info.get('available_at')
     if not url:
         # Respaldo: el mejor formato de SOLO audio. Ojo: los 'storyboard' (miniaturas de la barra
         # de progreso) también tienen vcodec='none', por eso se exige que tengan códec de audio.
@@ -372,10 +376,12 @@ def _apply_stream_info(song: Song, info: dict):
         if audio:
             best = max(audio, key=lambda f: f.get('abr') or f.get('tbr') or 0)
             url, headers = best['url'], best.get('http_headers') or headers
+            available_at = best.get('available_at') or available_at
 
     song.stream_url = url
     song.stream_fetched_at = time.monotonic() if url else None
     song.user_agent = headers.get('User-Agent')
+    song.available_at = available_at
     if info.get('is_live'):
         song.duration = None  # Directos: sin barra de progreso
     elif not song.duration:
@@ -502,6 +508,19 @@ async def _prepare_stream(song: Song) -> Optional[str]:
     return None if song.stream_url else "no encontré ningún formato de audio"
 
 
+async def _wait_until_available(song: Song):
+    """
+    YouTube da algunas URLs de audio (las del cliente de TV) que no deja descargar hasta unos segundos
+    después: antes contesta 403 y FFmpeg se corta nada más empezar. yt-dlp lo indica con available_at y
+    él mismo espera al descargar; aquí se espera igual antes de pasarle la URL a FFmpeg.
+    """
+    if song.available_at:
+        wait = song.available_at - time.time()
+        if wait > 0:
+            logger.info(f"⏳ YouTube deja descargar «{song.title}» dentro de {wait:.1f} s: esperando.")
+            await asyncio.sleep(min(wait + AVAILABLE_MARGIN, MAX_AVAILABLE_WAIT))
+
+
 def _ffmpeg_options(song: Song) -> dict:
     """Opciones de FFmpeg según el tipo de audio."""
     before = '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5'
@@ -609,6 +628,7 @@ async def play_next(voice_client: discord.VoiceClient, player: MusicPlayer):
             error = await _prepare_stream(song)
 
             if error is None:
+                await _wait_until_available(song)
                 if not _is_active(voice_client, player):
                     return  # Pararon la música mientras se extraía el audio
                 try:
