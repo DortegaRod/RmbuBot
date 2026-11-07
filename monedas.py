@@ -15,8 +15,14 @@ import db
 
 PLATA = 100          # Cobre que vale una de plata
 ORO = 100 * PLATA    # Cobre que vale una de oro
-COINS = (("oro", "🟡", ORO), ("plata", "⚪", PLATA), ("cobre", "🟤", 1))
 LEVEL_REWARD = PLATA  # Llegar al nivel N da N veces esto (N de plata)
+
+# Emojis de la aplicación (Developer Portal → el bot → Emojis): el bot los puede usar en cualquier servidor.
+# Si se vuelven a subir, cambian de ID: hay que copiar aquí los nuevos.
+EMOJI_ORO = "<:gold:1568622574965887048>"
+EMOJI_PLATA = "<:silver:1568622565012803594>"
+EMOJI_COBRE = "<:copper:1568622542980255835>"
+COINS = (("oro", EMOJI_ORO, ORO), ("plata", EMOJI_PLATA, PLATA), ("cobre", EMOJI_COBRE, 1))
 
 
 def fmt_number(number: int) -> str:
@@ -25,13 +31,13 @@ def fmt_number(number: int) -> str:
 
 
 def format_money(cobre: int) -> str:
-    """12345 -> '🟡 **1** oro · ⚪ **23** plata · 🟤 **45** cobre' (sin las monedas que estén a 0)."""
+    """12345 -> '(oro) **1** oro · (plata) **23** plata · (cobre) **45** cobre' (sin las monedas que estén a 0)."""
     parts = []
     for name, emoji, value in COINS:
         amount, cobre = divmod(cobre, value)
         if amount:
             parts.append(f"{emoji} **{fmt_number(amount)}** {name}")
-    return " · ".join(parts) or "🟤 **0** cobre"
+    return " · ".join(parts) or f"{EMOJI_COBRE} **0** cobre"
 
 
 def level_rewards(from_level: int, to_level: int) -> int:
