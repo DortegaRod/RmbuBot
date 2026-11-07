@@ -89,29 +89,33 @@ class PerfilCog(commands.Cog):
         group = cuentas.group_of(guild.id, member.id)
         money = await asyncio.to_thread(monedas.person_money, guild.id, group)
 
+        # Tres bloques separados: quién es (junto al avatar), su progreso y su bolsa. Sin emojis de adorno:
+        # lo importante en negrita y lo secundario en pequeño (-#)
         card = tarjetas.Card(member.colour if member.colour.value else tarjetas.LEVELS)
+        identity = [f"## {escape_markdown(member.display_name)}"]
         title = self.title_of(member)
-        heading = f"## 🛡️ {escape_markdown(member.display_name)}"
         if title is not None:
-            heading += f"\n🏷️ {title.mention}"
-        card.section(heading, member.display_avatar.url, f"Avatar de {member.display_name}")
-        levels = self.levels(guild.id)
-        if levels is not None:
-            xp = await asyncio.to_thread(niveles.person_xp, guild.id, group)
-            index = levels.position_of(levels.ranked_people(guild), guild.id, member.id)
-            position = f" · puesto **#{index + 1}**" if index is not None else ""
-            card.text(f"📈 **Nivel {niveles.level_for_xp(xp)}**{position} · {monedas.fmt_number(xp)} de experiencia\n"
-                      f"{niveles.level_progress(xp)}")
-        card.text(f"💰 {monedas.format_money(money)}")
-
+            identity.append(title.mention)
         joined = [account.joined_at for account in map(guild.get_member, group)
                   if account is not None and account.joined_at is not None]
         if joined:
             since = int(min(joined).timestamp())
+            identity.append(f"-# En el gremio desde el <t:{since}:D> (<t:{since}:R>)")
+        card.section("\n".join(identity), member.display_avatar.url, f"Avatar de {member.display_name}")
+
+        levels = self.levels(guild.id)
+        if levels is not None:
+            xp = await asyncio.to_thread(niveles.person_xp, guild.id, group)
+            index = levels.position_of(levels.ranked_people(guild), guild.id, member.id)
+            position = f" · Puesto **#{index + 1}**" if index is not None else ""
             card.separator()
-            card.note(f"📅 En el servidor desde <t:{since}:D> (<t:{since}:R>)")
+            card.text(f"**Nivel {niveles.level_for_xp(xp)}**{position}\n{niveles.level_progress(xp)}\n"
+                      f"-# {monedas.fmt_number(xp)} de experiencia en total")
+
+        card.separator()
+        card.text(f"**Bolsa**  {monedas.format_money(money)}")
         if len(group) > 1:
-            card.note("🔗 Cuentas vinculadas: " + " · ".join(f"<@{user_id}>" for user_id in group))
+            card.note("Cuentas vinculadas: " + " · ".join(f"<@{user_id}>" for user_id in group))
         return card
 
     @app_commands.command(name="perfil", description="Perfil de personaje: título, nivel, puesto, monedas y antigüedad")

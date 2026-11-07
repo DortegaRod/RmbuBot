@@ -336,17 +336,17 @@ def plan_import(guild_id: int, members: List[discord.Member], entries: List[Tupl
 # COMANDOS Y CONTADORES
 # ==========================================
 
-def progress_bar(fraction: float, length: int = 14) -> str:
+def progress_bar(fraction: float, length: int = 12) -> str:
+    """▰▰▰▱▱▱: se ve igual en el PC y en el móvil (los ░ salen punteados)."""
     filled = max(0, min(length, round(fraction * length)))
-    return "█" * filled + "░" * (length - filled)
+    return "▰" * filled + "▱" * (length - filled)
 
 
 def level_progress(xp: int) -> str:
-    """Barra hasta el nivel siguiente: `███░░░` 120 / 300 hasta el nivel 8."""
+    """Barra hasta el nivel siguiente: ▰▰▰▱▱▱  120 / 300 exp."""
     level = level_for_xp(xp)
     current, following = total_xp_for_level(level), total_xp_for_level(level + 1)
-    return (f"`{progress_bar((xp - current) / (following - current))}` "
-            f"{_fmt(xp - current)} / {_fmt(following - current)} hasta el nivel {level + 1}")
+    return f"{progress_bar((xp - current) / (following - current))}  {_fmt(xp - current)} / {_fmt(following - current)} exp"
 
 
 def pay_pending_levels(guild_ids: List[int]) -> Tuple[int, int]:
@@ -464,7 +464,7 @@ class NivelesCog(commands.Cog):
             heading = f"## 🎉 ¡Nivel {level}!\n{member.mention} sube del {old_level} al {level}"
         card.section(heading, member.display_avatar.url, f"Avatar de {member.display_name}")
         if coins:
-            card.text(f"💰 +{monedas.format_money(coins)}")
+            card.text(f"Gana {monedas.format_money(coins)}")
         card.text(level_progress(xp))
         card.separator()
         rank = f"🏅 Puesto #{index + 1} de {len(people)} · " if index is not None else ""

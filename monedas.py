@@ -66,13 +66,21 @@ def fmt_number(number: int) -> str:
 
 
 def format_money(cobre: int) -> str:
-    """12345 -> '(oro) **1** oro · (plata) **23** plata · (cobre) **45** cobre' (sin las monedas que estén a 0)."""
+    """
+    12345 -> '(oro) **1** · (plata) **23** · (cobre) **45**', sin las monedas que estén a 0. Con los emojis propios
+    no hace falta el nombre; con los puntos de colores de respaldo, sí («**1** oro»).
+    """
     parts = []
     for name, value in COINS:
         amount, cobre = divmod(cobre, value)
         if amount:
-            parts.append(f"{EMOJIS[name]} **{fmt_number(amount)}** {name}")
-    return " · ".join(parts) or f"{EMOJIS['cobre']} **0** cobre"
+            parts.append(_coin(name, amount))
+    return " · ".join(parts) or _coin("cobre", 0)
+
+
+def _coin(name: str, amount: int) -> str:
+    own_emoji = EMOJIS[name].startswith("<")
+    return f"{EMOJIS[name]} **{fmt_number(amount)}**" + ("" if own_emoji else f" {name}")
 
 
 def level_rewards(from_level: int, to_level: int) -> int:
