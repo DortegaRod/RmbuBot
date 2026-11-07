@@ -22,6 +22,7 @@ import audit
 import ayuda
 import cache
 import db
+import monedas
 import tarjetas
 from notifier import send_deletion_log, send_bulk_delete_log
 from musica import MusicaCog
@@ -117,6 +118,8 @@ async def on_ready():
     """Se dispara cuando el bot establece conexión exitosa con los servidores de Discord."""
     global log_guild_id
     logger.info(f"✅ Bot conectado como {bot.user}")
+    # Emojis de oro, plata y cobre: los de la aplicación (o de un servidor) con esos nombres
+    await monedas.find_emojis(bot)
 
     # Autodetección del servidor de auditoría a partir del canal de logs.
     admin_channel = bot.get_channel(ADMIN_LOG_CHANNEL_ID)
