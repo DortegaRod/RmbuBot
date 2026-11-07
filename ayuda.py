@@ -66,6 +66,7 @@ def _admin() -> str:
         f"{cmd('niveles-importar')} — Importa la clasificación de Amari\n"
         f"{cmd('vincular-cuentas')} — Vincula cuentas de una persona sin pedirle confirmación\n"
         f"{cmd('evento-voz')} — Evento de Discord automático cuando alguien con un rol entra en un canal de voz\n"
+        f"{cmd('setup-eventos')} — Canal donde se avisa con el enlace cuando empieza un evento\n"
         "-# Necesitan el permiso «Gestionar servidor»."
     )
 
