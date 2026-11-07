@@ -40,7 +40,7 @@ def format_money(cobre: int) -> str:
         amount, cobre = divmod(cobre, value)
         if amount:
             parts.append(_coin(name, amount))
-    return " · ".join(parts) or _coin("cobre", 0)
+    return tarjetas.ITEM_SEP.join(parts) or _coin("cobre", 0)
 
 
 def _coin(name: str, amount: int) -> str:

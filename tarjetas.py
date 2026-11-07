@@ -21,6 +21,10 @@ logger = logging.getLogger(__name__)
 
 NO_MENTIONS = discord.AllowedMentions.none()
 MAX_TEXT = 4000  # Caracteres de texto entre todos los componentes de un mensaje
+# Separadores en una misma línea: «·» entre partes del mismo dato (oro · plata), «│» entre datos
+# distintos (Nivel 60 │ Puesto #1)
+ITEM_SEP = " · "
+FIELD_SEP = "  │  "
 
 # Color de la barra de cada tipo de tarjeta
 MUSIC = discord.Colour.green()

@@ -107,7 +107,7 @@ class PerfilCog(commands.Cog):
         if levels is not None:
             xp = await asyncio.to_thread(niveles.person_xp, guild.id, group)
             index = levels.position_of(levels.ranked_people(guild), guild.id, member.id)
-            position = f" · Puesto #{index + 1}" if index is not None else ""
+            position = f"{tarjetas.FIELD_SEP}Puesto #{index + 1}" if index is not None else ""
             card.separator()
             # El nivel como subtítulo: es lo que más se mira, que se vea grande
             card.text(f"### Nivel {niveles.level_for_xp(xp)}{position}\n{niveles.level_progress(xp)}\n"
@@ -115,7 +115,7 @@ class PerfilCog(commands.Cog):
 
         card.separator()
         # El valor total en cobre, para comparar; si solo hay cobre, repetiría lo mismo
-        total = f"  ({monedas.format_total(money)})" if money >= monedas.PLATA else ""
+        total = f"{tarjetas.FIELD_SEP}{monedas.format_total(money)}" if money >= monedas.PLATA else ""
         card.text(f"**Bolsa**  {monedas.format_money(money)}{total}")
         if len(group) > 1:
             card.note("Cuentas vinculadas: " + " · ".join(f"<@{user_id}>" for user_id in group))
