@@ -28,6 +28,7 @@ from musica import MusicaCog
 from palabra import PalabraCog
 from cuentas import CuentasCog
 from niveles import NivelesCog
+from ficha import FichaCog
 from eventos_voz import EventosVozCog
 from tarjetas import NO_MENTIONS
 
@@ -68,6 +69,8 @@ class MusicBot(commands.Bot):
         await self.add_cog(CuentasCog(self))
         # Niveles: experiencia por mensajes y voz, avisos y roles de recompensa
         await self.add_cog(NivelesCog(self))
+        # Ficha de personaje: /ficha (título, nivel, monedas) y /titulos
+        await self.add_cog(FichaCog(self))
         # Eventos de voz: /evento-voz; evento de Discord automático al entrar alguien con el rol en su canal
         await self.add_cog(EventosVozCog(self))
         await self.register_commands()

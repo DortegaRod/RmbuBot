@@ -9,6 +9,8 @@ salvo la voz, que va más despacio:
   Amari no la daba, y con 5 aquí se subía mucho más rápido que allí.
 - Nivel N con 20·N² − 40·N + 55 de experiencia total (la fórmula de Amari).
 - Roles de recompensa acumulativos y aviso de subida de nivel en el canal configurado.
+- Cada nivel da monedas (monedas.py): llegar al nivel N da N de plata. Los niveles que cada uno ya tenía
+  se pagan al arrancar.
 - Todo va por persona: las cuentas vinculadas (cuentas.py) suman su experiencia y comparten
   la espera entre mensajes y el tiempo en voz (dos cuentas a la vez no dan el doble).
 
@@ -31,6 +33,7 @@ from discord.utils import escape_markdown
 
 import cuentas
 import db
+import monedas
 import tarjetas
 from tarjetas import NO_MENTIONS
 
@@ -333,9 +336,34 @@ def plan_import(guild_id: int, members: List[discord.Member], entries: List[Tupl
 # COMANDOS Y CONTADORES
 # ==========================================
 
-def _progress_bar(fraction: float, length: int = 14) -> str:
+def progress_bar(fraction: float, length: int = 14) -> str:
     filled = max(0, min(length, round(fraction * length)))
     return "█" * filled + "░" * (length - filled)
+
+
+def level_progress(xp: int) -> str:
+    """Barra hasta el nivel siguiente: `███░░░` 120 / 300 hasta el nivel 8."""
+    level = level_for_xp(xp)
+    current, following = total_xp_for_level(level), total_xp_for_level(level + 1)
+    return (f"`{progress_bar((xp - current) / (following - current))}` "
+            f"{_fmt(xp - current)} / {_fmt(following - current)} hasta el nivel {level + 1}")
+
+
+def pay_pending_levels(guild_ids: List[int]) -> Tuple[int, int]:
+    """
+    Paga en monedas los niveles que cada persona tiene y aún no se le han pagado (al arrancar: así cobran
+    los niveles de antes de existir las monedas). Devuelve (personas pagadas, cobre en total).
+    """
+    paid_people = total = 0
+    for guild_id in guild_ids:
+        people: Dict[int, int] = defaultdict(int)
+        for user_id, xp in ranking_rows(guild_id):
+            people[cuentas.principal_of(guild_id, user_id)] += xp
+        paid, amount = monedas.pay_levels_many(
+            guild_id, [(cuentas.group_of(guild_id, principal), level_for_xp(xp)) for principal, xp in people.items()]
+        )
+        paid_people, total = paid_people + paid, total + amount
+    return paid_people, total
 
 
 class NivelesCog(commands.Cog):
@@ -351,7 +379,12 @@ class NivelesCog(commands.Cog):
 
     async def cog_load(self):
         init_db()
+        monedas.init_db()
         self.reload_settings()
+        paid_people, total = await asyncio.to_thread(pay_pending_levels, list(self.channels))
+        if paid_people:
+            logger.info(f"💰 Monedas: pagados los niveles pendientes de {paid_people} personas "
+                        f"({_fmt(total)} de cobre en total)")
         cuentas.on_linked = self.on_linked
         tarjetas.register_pages("ranking", self._render_ranking)  # Flechas y «Mi puesto» del /ranking
         self.voice_xp.start()
@@ -366,13 +399,21 @@ class NivelesCog(commands.Cog):
     # ---------- Experiencia ----------
 
     async def award(self, guild: discord.Guild, member: discord.Member, amount: int):
-        """Suma experiencia y, si la persona sube de nivel, le da las recompensas y lo anuncia."""
+        """Suma experiencia y, si la persona sube de nivel, le da las recompensas (roles y monedas) y lo anuncia."""
         group = cuentas.group_of(guild.id, member.id)
         new_total = await asyncio.to_thread(add_xp, guild.id, member.id, amount, group)
         old_level, new_level = level_for_xp(new_total - amount), level_for_xp(new_total)
         if new_level > old_level:
+            coins = await self.pay_levels(guild, member.id, new_level)
             roles = await self.sync_person(guild, member.id, new_level)
-            await self.announce_level_up(guild, member, old_level, new_level, new_total, roles)
+            await self.announce_level_up(guild, member, old_level, new_level, new_total, roles, coins)
+
+    async def pay_levels(self, guild: discord.Guild, user_id: int, level: Optional[int] = None) -> int:
+        """Paga en monedas los niveles de la persona que no tuviera pagados. Devuelve lo pagado, en cobre."""
+        group = cuentas.group_of(guild.id, user_id)
+        if level is None:
+            level = level_for_xp(await asyncio.to_thread(person_xp, guild.id, group))
+        return await asyncio.to_thread(monedas.pay_levels, guild.id, group, level)
 
     async def sync_person(self, guild: discord.Guild, user_id: int, level: Optional[int] = None) -> List[discord.Role]:
         """
@@ -403,15 +444,15 @@ class NivelesCog(commands.Cog):
 
     async def on_linked(self, guild: discord.Guild, principal_id: int):
         """Al vincular cuentas se suma su experiencia: puede tocarle alguna recompensa (sin aviso)."""
+        await self.pay_levels(guild, principal_id)
         await self.sync_person(guild, principal_id)
 
     def level_up_card(self, guild: discord.Guild, member: discord.Member, old_level: int, level: int,
-                      xp: int, roles: List[discord.Role]) -> tarjetas.Card:
+                      xp: int, roles: List[discord.Role], coins: int = 0) -> tarjetas.Card:
         """
-        Aviso de subida de nivel: su avatar al lado, barra hasta el siguiente nivel y puesto, en el
-        color de su rol. Si trae un rol de recompensa, dorada y con el rol en el título.
+        Aviso de subida de nivel: su avatar al lado, las monedas ganadas, barra hasta el siguiente nivel y
+        puesto, en el color de su rol. Si trae un rol de recompensa, dorada y con el rol en el título.
         """
-        current, following = total_xp_for_level(level), total_xp_for_level(level + 1)
         people = self._ranked_people(guild)
         index = self._position_of(people, guild.id, member.id)
         if roles:
@@ -422,20 +463,21 @@ class NivelesCog(commands.Cog):
             card = tarjetas.Card(member.colour if member.colour.value else tarjetas.LEVELS)
             heading = f"## 🎉 ¡Nivel {level}!\n{member.mention} sube del {old_level} al {level}"
         card.section(heading, member.display_avatar.url, f"Avatar de {member.display_name}")
-        card.text(f"`{_progress_bar((xp - current) / (following - current))}` "
-                  f"{_fmt(xp - current)} / {_fmt(following - current)} hasta el nivel {level + 1}")
+        if coins:
+            card.text(f"💰 +{monedas.format_money(coins)}")
+        card.text(level_progress(xp))
         card.separator()
         rank = f"🏅 Puesto #{index + 1} de {len(people)} · " if index is not None else ""
         card.note(f"{rank}{_fmt(xp)} de experiencia")
         return card
 
     async def announce_level_up(self, guild: discord.Guild, member: discord.Member, old_level: int, level: int,
-                                xp: int, roles: List[discord.Role]):
+                                xp: int, roles: List[discord.Role], coins: int = 0):
         channel = guild.get_channel(self.channels.get(guild.id, 0))
         if channel is None:
             return
         try:
-            card = self.level_up_card(guild, member, old_level, level, xp, roles)
+            card = self.level_up_card(guild, member, old_level, level, xp, roles, coins)
             # La mención va dentro de la tarjeta y avisa solo a esa persona
             await channel.send(view=card, allowed_mentions=discord.AllowedMentions(everyone=False, roles=False,
                                                                                    users=[member]))
@@ -525,15 +567,13 @@ class NivelesCog(commands.Cog):
         group = cuentas.group_of(guild.id, member.id)
         xp = person_xp(guild.id, group)
         level = level_for_xp(xp)
-        current, following = total_xp_for_level(level), total_xp_for_level(level + 1)
         index = self._position_of(self._ranked_people(guild), guild.id, member.id)
         position = f" · puesto **#{index + 1}**" if index is not None else ""
 
         card = tarjetas.Card(tarjetas.LEVELS)
         card.section(f"## 📈 {escape_markdown(member.display_name)}\n**Nivel {level}**{position}\n"
                      f"{_fmt(xp)} de experiencia", member.display_avatar.url, f"Avatar de {member.display_name}")
-        card.text(f"`{_progress_bar((xp - current) / (following - current))}` "
-                  f"{_fmt(xp - current)} / {_fmt(following - current)} hasta el nivel {level + 1}")
+        card.text(level_progress(xp))
         if len(group) > 1:
             card.note("🔗 Cuentas vinculadas: " + " · ".join(f"<@{uid}>" for uid in group))
         return card
@@ -724,9 +764,11 @@ class NivelesCog(commands.Cog):
                                                            ephemeral=True)
         xp = exp if exp is not None else total_xp_for_level(nivel)
         await asyncio.to_thread(set_person_xp, interaction.guild_id, cuentas.group_of(interaction.guild_id, usuario.id), xp)
+        coins = await self.pay_levels(interaction.guild, usuario.id, level_for_xp(xp))
         await self.sync_person(interaction.guild, usuario.id, level_for_xp(xp))
+        paid = f" Cobra {monedas.format_money(coins)} por sus niveles nuevos." if coins else ""
         await interaction.response.send_message(
-            f"✅ {usuario.mention} tiene ahora **{_fmt(xp)}** de experiencia (nivel **{level_for_xp(xp)}**).",
+            f"✅ {usuario.mention} tiene ahora **{_fmt(xp)}** de experiencia (nivel **{level_for_xp(xp)}**).{paid}",
             allowed_mentions=NO_MENTIONS
         )
 
@@ -754,6 +796,7 @@ class NivelesCog(commands.Cog):
         totals, problems, unknown = plan_import(guild.id, guild.members, entries, groups)
         for principal, xp in totals.items():
             await asyncio.to_thread(set_person_xp, guild.id, cuentas.group_of(guild.id, principal), xp)
+            await self.pay_levels(guild, principal, level_for_xp(xp))
             await self.sync_person(guild, principal, level_for_xp(xp))
 
         card = tarjetas.Card(tarjetas.SUCCESS if not problems else tarjetas.WARNING)

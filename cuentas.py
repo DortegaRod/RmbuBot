@@ -1,6 +1,6 @@
 """
 Cuentas vinculadas: varias cuentas de Discord que son de la misma persona.
-Su experiencia se suma como si fueran una sola (y servirá igual para la futura moneda).
+Su experiencia se suma como si fueran una sola (y lo mismo sus monedas, monedas.py).
 
 - Cada persona tiene una cuenta principal; las demás apuntan a ella.
 - Cualquiera puede vincular otra cuenta suya con /vincular, pero la otra cuenta tiene que
