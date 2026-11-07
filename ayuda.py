@@ -36,7 +36,7 @@ def _music() -> str:
 
 def _palabra() -> str:
     return (
-        "## 🟩 Palabra del día\n"
+        "## 📊 Palabra del día\n"
         f"{cmd('palabra')} — Adivina la palabra de hoy en 6 intentos (tus letras solo las ves tú)\n"
         f"{cmd('palabra-stats')} — Tus estadísticas y rachas, o las de otra persona\n"
         "-# Hay palabra nueva cada día a medianoche (hora de España). Las tildes no cuentan; la Ñ sí."
@@ -73,7 +73,7 @@ def _admin() -> str:
 # Sección -> (emoji, nombre, descripción en el menú, texto)
 SECTIONS: Dict[str, Tuple[str, str, str, Callable[[], str]]] = {
     "musica": ("🎵", "Música", "YouTube, Spotify y radios, con botones en cada canción", _music),
-    "palabra": ("🟩", "Palabra del día", "El Wordle en español, con rachas", _palabra),
+    "palabra": ("📊", "Palabra del día", "El Wordle en español, con rachas", _palabra),
     "niveles": ("📈", "Niveles", "Experiencia por escribir y estar en voz", _niveles),
     "admin": ("⚙️", "Administración", "Configuración del bot (solo admins)", _admin),
 }

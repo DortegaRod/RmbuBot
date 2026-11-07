@@ -147,7 +147,7 @@ except Exception as e:
     print(f"   ⚠️  Error al verificar FFmpeg: {e}")
 
 # --- Palabra del día ---
-check("🟩 Palabra del día")
+check("📊 Palabra del día")
 data_dir = Path(__file__).parent / "datos"
 for name in ("palabras_validas.txt", "palabras_respuestas.txt"):
     exists = (data_dir / name).is_file()

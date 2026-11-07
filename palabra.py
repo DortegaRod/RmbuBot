@@ -82,7 +82,7 @@ def load_words() -> bool:
     ANSWERS[:] = answers
     if SPAIN_TZ is timezone.utc:
         logger.warning("⚠️ Sin zona horaria de España: la palabra cambiará a medianoche UTC (pip install tzdata)")
-    logger.info(f"🟩 Palabra del día: {len(ANSWERS)} respuestas posibles y {len(VALID_WORDS)} palabras válidas")
+    logger.info(f"📊 Palabra del día: {len(ANSWERS)} respuestas posibles y {len(VALID_WORDS)} palabras válidas")
     return bool(ANSWERS)
 
 
@@ -355,7 +355,7 @@ def board_card(numero: int, answer_display: str, game: Game, fecha: str, notice:
 
     colour = discord.Colour.green() if game.won else discord.Colour.red() if game.finished else tarjetas.INFO
     card = tarjetas.Card(colour)
-    card.text(f"## 🟩 Palabra del día #{numero}")
+    card.text(f"## 📊 Palabra del día #{numero}")
     if notice:
         card.text(f"⚠️ {notice}")
     if not game.guesses:
@@ -411,7 +411,7 @@ def announcement_card(guild: discord.Guild, day: date, role: Optional[discord.Ro
     card = tarjetas.Card(tarjetas.WORDLE)
     # La mención va dentro de la tarjeta: avisa igual que en un mensaje normal
     mention = f"{role.mention}\n" if role else ""
-    card.text(f"{mention}## 🟩 Palabra del día #{numero}\n"
+    card.text(f"{mention}## 📊 Palabra del día #{numero}\n"
               f"¡Nueva palabra! Pulsa **Jugar** o usa {tarjetas.cmd('palabra')}: tus letras solo las ves tú.")
     yesterday = day - timedelta(days=1)
     previous = find_word(yesterday)
@@ -529,7 +529,7 @@ async def submit_guess(interaction: discord.Interaction, fecha: str, raw: str):
             await _publish_result(interaction, channel, numero, answer, game)
 
 
-class GuessModal(discord.ui.Modal, title="🟩 Palabra del día"):
+class GuessModal(discord.ui.Modal, title="📊 Palabra del día"):
     guess = discord.ui.TextInput(label="Tu palabra de 5 letras", min_length=5, max_length=5,
                                  placeholder="Ej.: perro (las tildes no cuentan)")
 
@@ -578,7 +578,7 @@ class PlayButton(discord.ui.DynamicItem[discord.ui.Button], template=r"reimbou:p
     """Botón «Jugar» del anuncio diario: abre el tablero de hoy de quien lo pulsa (como /palabra)."""
 
     def __init__(self):
-        super().__init__(discord.ui.Button(label="Jugar", emoji="🟩", style=discord.ButtonStyle.success,
+        super().__init__(discord.ui.Button(label="Jugar", emoji="📊", style=discord.ButtonStyle.success,
                                            custom_id="reimbou:palabra:jugar"))
 
     @classmethod
