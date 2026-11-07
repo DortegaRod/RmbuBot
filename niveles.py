@@ -453,8 +453,8 @@ class NivelesCog(commands.Cog):
         Aviso de subida de nivel: su avatar al lado, las monedas ganadas, barra hasta el siguiente nivel y
         puesto, en el color de su rol. Si trae un rol de recompensa, dorada y con el rol en el título.
         """
-        people = self._ranked_people(guild)
-        index = self._position_of(people, guild.id, member.id)
+        people = self.ranked_people(guild)
+        index = self.position_of(people, guild.id, member.id)
         if roles:
             names = " y ".join(f"**{escape_markdown(role.name)}**" for role in roles)
             card = tarjetas.Card(tarjetas.RANKING)
@@ -543,7 +543,7 @@ class NivelesCog(commands.Cog):
 
     # ---------- Comandos para todos ----------
 
-    def _ranked_people(self, guild: discord.Guild) -> List[Tuple[discord.Member, int, int]]:
+    def ranked_people(self, guild: discord.Guild) -> List[Tuple[discord.Member, int, int]]:
         """Clasificación por persona: (cuenta que se muestra, experiencia total, nº de cuentas)."""
         totals: Dict[int, int] = defaultdict(int)
         for user_id, xp in ranking_rows(guild.id):
@@ -557,47 +557,20 @@ class NivelesCog(commands.Cog):
         people.sort(key=lambda person: (-person[1], person[0].id))
         return people
 
-    def _position_of(self, people: List[Tuple[discord.Member, int, int]], guild_id: int, user_id: int) -> Optional[int]:
+    def position_of(self, people: List[Tuple[discord.Member, int, int]], guild_id: int, user_id: int) -> Optional[int]:
         """Puesto (desde 0) de la persona a la que pertenece `user_id`, o None si no está en el ranking."""
         person = cuentas.principal_of(guild_id, user_id)
         return next((i for i, (shown, _, _) in enumerate(people) if cuentas.principal_of(guild_id, shown.id) == person),
                     None)
-
-    def nivel_card(self, guild: discord.Guild, member: discord.Member) -> tarjetas.Card:
-        group = cuentas.group_of(guild.id, member.id)
-        xp = person_xp(guild.id, group)
-        level = level_for_xp(xp)
-        index = self._position_of(self._ranked_people(guild), guild.id, member.id)
-        position = f" · puesto **#{index + 1}**" if index is not None else ""
-
-        card = tarjetas.Card(tarjetas.LEVELS)
-        card.section(f"## 📈 {escape_markdown(member.display_name)}\n**Nivel {level}**{position}\n"
-                     f"{_fmt(xp)} de experiencia", member.display_avatar.url, f"Avatar de {member.display_name}")
-        card.text(level_progress(xp))
-        if len(group) > 1:
-            card.note("🔗 Cuentas vinculadas: " + " · ".join(f"<@{uid}>" for uid in group))
-        return card
-
-    @app_commands.command(name="nivel", description="Muestra el nivel y la experiencia de alguien")
-    @app_commands.guild_only()
-    @app_commands.describe(usuario="De quién ver el nivel (por defecto, el tuyo)")
-    async def nivel(self, interaction: discord.Interaction, usuario: Optional[discord.Member] = None):
-        if interaction.guild_id not in self.channels:
-            return await interaction.response.send_message(
-                f"📈 Los niveles no están activados en este servidor (un admin puede hacerlo con "
-                f"{tarjetas.cmd('setup-niveles')}).", ephemeral=True
-            )
-        card = self.nivel_card(interaction.guild, usuario or interaction.user)
-        await interaction.response.send_message(view=card, allowed_mentions=NO_MENTIONS)
 
     def ranking_card(self, guild: discord.Guild, owner_id: int, page: Union[int, str]) -> Union[tarjetas.Card, str]:
         """
         Una página del ranking. `owner_id` es quien la ve (su fila lleva 👈); `page` puede ser «yo»:
         la página donde está esa persona.
         """
-        people = self._ranked_people(guild)
+        people = self.ranked_people(guild)
         pages = max(1, math.ceil(len(people) / RANKING_PAGE_SIZE))
-        mine = self._position_of(people, guild.id, owner_id)
+        mine = self.position_of(people, guild.id, owner_id)
         if page == "yo":
             if mine is None:
                 return "📍 Aún no apareces en el ranking: escribe o entra en un canal de voz para ganar experiencia."
@@ -739,7 +712,7 @@ class NivelesCog(commands.Cog):
         # Quien ya tenga ese nivel lo recibe ahora, sin esperar a volver a subir
         await interaction.response.defer()
         people = set()
-        for shown, xp, _ in self._ranked_people(guild):
+        for shown, xp, _ in self.ranked_people(guild):
             if level_for_xp(xp) < nivel:
                 break  # Están ordenados de mayor a menor experiencia
             if rol in await self.sync_person(guild, shown.id):

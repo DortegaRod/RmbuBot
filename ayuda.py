@@ -46,8 +46,7 @@ def _palabra() -> str:
 def _niveles() -> str:
     return (
         "## 📈 Niveles\n"
-        f"{cmd('ficha')} — Tu ficha: título, nivel, monedas y desde cuándo estás (o la de otra persona)\n"
-        f"{cmd('nivel')} — Tu nivel, experiencia y puesto (o los de otra persona)\n"
+        f"{cmd('perfil')} — Tu título, nivel, puesto, monedas y desde cuándo estás (o los de otra persona)\n"
         f"{cmd('ranking')} — La clasificación del servidor\n"
         f"{cmd('vincular')} — Une otra cuenta tuya: vuestra experiencia se suma\n"
         f"{cmd('desvincular')} — Separa una cuenta vinculada\n"
@@ -69,7 +68,7 @@ def _admin() -> str:
         f"{cmd('vincular-cuentas')} — Vincula cuentas de una persona sin pedirle confirmación\n"
         f"{cmd('evento-voz')} — Evento de Discord automático cuando alguien con un rol entra en un canal de voz\n"
         f"{cmd('setup-eventos')} — Canal donde se avisa con el enlace cuando empieza un evento\n"
-        f"{cmd('titulos')} — Qué roles salen como título en la ficha\n"
+        f"{cmd('titulos')} — Qué roles salen como título en el perfil\n"
         "-# Necesitan el permiso «Gestionar servidor»."
     )
 
@@ -78,7 +77,7 @@ def _admin() -> str:
 SECTIONS: Dict[str, Tuple[str, str, str, Callable[[], str]]] = {
     "musica": ("🎵", "Música", "YouTube, Spotify y radios, con botones en cada canción", _music),
     "palabra": ("📊", "Palabra del día", "El Wordle en español, con rachas", _palabra),
-    "niveles": ("📈", "Niveles y ficha", "Experiencia, monedas y tu ficha de personaje", _niveles),
+    "niveles": ("📈", "Niveles y perfil", "Experiencia, monedas y tu perfil de personaje", _niveles),
     "admin": ("⚙️", "Administración", "Configuración del bot (solo admins)", _admin),
 }
 
