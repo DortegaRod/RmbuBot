@@ -47,12 +47,13 @@ def _gremio() -> str:
     return (
         "## 📜 Gremio\n"
         f"{cmd('perfil')} — Tu título, nivel, puesto, monedas y desde cuándo estás (o los de otra persona)\n"
+        f"{cmd('craftear')} — Tu forja: craftea plata y oro con tus monedas, o fúndelas\n"
         f"{cmd('ranking')} — La clasificación del gremio\n"
         f"{cmd('vincular')} — Une otra cuenta tuya: vuestra experiencia se suma\n"
         f"{cmd('desvincular')} — Separa una cuenta vinculada\n"
-        "-# Se gana experiencia escribiendo y estando en voz. Llegar al nivel N da N de plata.\n"
-        f"-# {tarjetas.emoji('cobre')} 100 de cobre = {tarjetas.emoji('plata')} 1 de plata · "
-        f"{tarjetas.emoji('plata')} 100 de plata = {tarjetas.emoji('oro')} 1 de oro."
+        "-# Se gana experiencia escribiendo y estando en voz. Llegar al nivel N da N × 100 de cobre.\n"
+        f"-# En la forja, {tarjetas.emoji('cobre')} 100 de cobre hacen {tarjetas.emoji('plata')} 1 de plata y "
+        f"{tarjetas.emoji('plata')} 100 de plata, {tarjetas.emoji('oro')} 1 de oro."
     )
 
 

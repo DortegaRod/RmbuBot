@@ -29,6 +29,7 @@ from palabra import PalabraCog
 from cuentas import CuentasCog
 from niveles import NivelesCog
 from perfil import PerfilCog
+from forja import ForjaCog
 from eventos_voz import EventosVozCog
 from tarjetas import NO_MENTIONS
 
@@ -71,6 +72,8 @@ class MusicBot(commands.Bot):
         await self.add_cog(NivelesCog(self))
         # Perfil de personaje: /perfil (título, nivel, monedas) y /titulos
         await self.add_cog(PerfilCog(self))
+        # Forja: /craftear y sus botones (plata y oro se craftean con cobre)
+        await self.add_cog(ForjaCog(self))
         # Eventos de voz: /evento-voz; evento de Discord automático al entrar alguien con el rol en su canal
         await self.add_cog(EventosVozCog(self))
         await self.register_commands()

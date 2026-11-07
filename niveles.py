@@ -9,7 +9,7 @@ salvo la voz, que va más despacio:
   Amari no la daba, y con 5 aquí se subía mucho más rápido que allí.
 - Nivel N con 20·N² − 40·N + 55 de experiencia total (la fórmula de Amari).
 - Roles de recompensa acumulativos y aviso de subida de nivel en el canal configurado.
-- Cada nivel da monedas (monedas.py): llegar al nivel N da N de plata. Los niveles que cada uno ya tenía
+- Cada nivel da monedas (monedas.py): llegar al nivel N da N × 100 de cobre. Los niveles que cada uno ya tenía
   se pagan al arrancar.
 - Todo va por persona: las cuentas vinculadas (cuentas.py) suman su experiencia y comparten
   la espera entre mensajes y el tiempo en voz (dos cuentas a la vez no dan el doble).
@@ -471,7 +471,7 @@ class NivelesCog(commands.Cog):
             heading = f"## 🎉 ¡Nivel {level}!\n{member.mention} sube del {old_level} al {level}"
         card.section(heading, member.display_avatar.url, f"Avatar de {member.display_name}")
         if coins:
-            card.text(f"Gana {monedas.format_money(coins)}")
+            card.text(f"Gana {monedas.coin('cobre', coins)}")
         card.text(level_progress(xp))
         card.separator()
         rank = f"🏅 Puesto #{index + 1} de {len(people)} · " if index is not None else ""
@@ -746,7 +746,7 @@ class NivelesCog(commands.Cog):
         await asyncio.to_thread(set_person_xp, interaction.guild_id, cuentas.group_of(interaction.guild_id, usuario.id), xp)
         coins = await self.pay_levels(interaction.guild, usuario.id, level_for_xp(xp))
         await self.sync_person(interaction.guild, usuario.id, level_for_xp(xp))
-        paid = f" Cobra {monedas.format_money(coins)} por sus niveles nuevos." if coins else ""
+        paid = f" Cobra {monedas.coin('cobre', coins)} por sus niveles nuevos." if coins else ""
         await interaction.response.send_message(
             f"✅ {usuario.mention} tiene ahora **{_fmt(xp)}** de experiencia (nivel **{level_for_xp(xp)}**).{paid}",
             allowed_mentions=NO_MENTIONS
