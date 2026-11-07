@@ -48,8 +48,8 @@ def _coin(name: str, amount: int) -> str:
 
 
 def format_total(cobre: int) -> str:
-    """Todo el saldo en cobre, para comparar de un vistazo: 183000 -> '183.000 de cobre'."""
-    return f"{fmt_number(cobre)} de cobre"
+    """Todo el saldo en cobre, para comparar de un vistazo: 183000 -> '183.000 (cobre)'."""
+    return f"{fmt_number(cobre)} {tarjetas.emoji('cobre')}"
 
 
 def level_rewards(from_level: int, to_level: int) -> int:
