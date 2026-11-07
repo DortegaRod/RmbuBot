@@ -1,5 +1,5 @@
 """
-/help: una tarjeta con un menú para elegir sección (Música, Palabra del día, Niveles y Administración).
+/help: una tarjeta con un menú para elegir sección (Música, Palabra del día, Gremio y Administración).
 La sección de administración solo la ven quienes tienen «Gestionar servidor».
 Los comandos se pueden pulsar desde la ayuda para escribirlos (cuando se conocen sus IDs).
 """
@@ -43,11 +43,11 @@ def _palabra() -> str:
     )
 
 
-def _niveles() -> str:
+def _gremio() -> str:
     return (
-        "## 📈 Niveles\n"
+        "## 📜 Gremio\n"
         f"{cmd('perfil')} — Tu título, nivel, puesto, monedas y desde cuándo estás (o los de otra persona)\n"
-        f"{cmd('ranking')} — La clasificación del servidor\n"
+        f"{cmd('ranking')} — La clasificación del gremio\n"
         f"{cmd('vincular')} — Une otra cuenta tuya: vuestra experiencia se suma\n"
         f"{cmd('desvincular')} — Separa una cuenta vinculada\n"
         "-# Se gana experiencia escribiendo y estando en voz. Llegar al nivel N da N de plata.\n"
@@ -77,7 +77,7 @@ def _admin() -> str:
 SECTIONS: Dict[str, Tuple[str, str, str, Callable[[], str]]] = {
     "musica": ("🎵", "Música", "YouTube, Spotify y radios, con botones en cada canción", _music),
     "palabra": ("📊", "Palabra del día", "El Wordle en español, con rachas", _palabra),
-    "niveles": ("📈", "Niveles y perfil", "Experiencia, monedas y tu perfil de personaje", _niveles),
+    "niveles": ("📜", "Gremio", "Tu perfil, nivel, monedas y el ranking del gremio", _gremio),
     "admin": ("⚙️", "Administración", "Configuración del bot (solo admins)", _admin),
 }
 
