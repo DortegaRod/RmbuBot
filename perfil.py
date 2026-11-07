@@ -103,7 +103,7 @@ class PerfilCog(commands.Cog):
                   if account is not None and account.joined_at is not None]
         if joined:
             since = int(min(joined).timestamp())
-            identity.append(f"-# 📅 En el gremio desde el <t:{since}:D> (<t:{since}:R>)")
+            identity.append(f"-# 📅 En el gremio **{escape_markdown(guild.name)}** desde el <t:{since}:D> (<t:{since}:R>)")
         card.section("\n".join(identity), member.display_avatar.url, f"Avatar de {member.display_name}")
 
         levels = self.levels(guild.id)
