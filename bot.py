@@ -1,12 +1,15 @@
 """
 Módulo Principal del Bot de Discord.
-Maneja la conexión con la API de Discord, enrutamiento de comandos (Slash Commands),
-y eventos de auditoría (logs de mensajes borrados).
+Maneja la conexión con la API de Discord, carga los módulos (cogs), registra los comandos de barra
+y los eventos de auditoría (logs de mensajes borrados). La música está en musica.py.
 """
 
 import asyncio
+import hashlib
+import json
 import logging
 import re
+from pathlib import Path
 from typing import List, Optional, Tuple, Union
 
 import discord
@@ -14,29 +17,28 @@ from discord import app_commands
 from discord.ext import commands
 from discord.utils import escape_markdown
 
-from config import TOKEN, ADMIN_LOG_CHANNEL_ID, AUDIT_WAIT_SECONDS, MAX_QUEUE_SIZE
+from config import TOKEN, ADMIN_LOG_CHANNEL_ID, AUDIT_WAIT_SECONDS
 import audit
 import ayuda
 import cache
-import controls
 import db
 import tarjetas
 from notifier import send_deletion_log, send_bulk_delete_log
-from music import (
-    music_manager, search_youtube, disconnect_player, empty_channel_disconnect,
-    log_dependency_status, SearchError, Song, LOOP_OFF, LOOP_CURRENT
-)
-from radios import RADIOS, RADIOS_BY_KEY, RADIO_ICON, fetch_now_playing
-from controls import deny_control, deny_join
+from musica import MusicaCog
 from palabra import PalabraCog
 from cuentas import CuentasCog
 from niveles import NivelesCog
 from eventos_voz import EventosVozCog
+from tarjetas import NO_MENTIONS
 
 # --- INICIALIZACIÓN ---
 logger = logging.getLogger(__name__)
 
-NO_MENTIONS = discord.AllowedMentions.none()  # Mencionar en los avisos sin notificar a nadie
+# Huella de los comandos que se subieron a Discord la última vez. Bórralo para forzar la subida.
+SYNC_STAMP = Path(__file__).parent / ".comandos_sincronizados"
+
+# Nombres en español de los permisos que piden los comandos (para el mensaje de error)
+PERMISSION_NAMES = {"manage_guild": "Gestionar servidor"}
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -56,13 +58,10 @@ class MusicBot(commands.Bot):
 
     async def setup_hook(self):
         db.init_db()
-        log_dependency_status()
-        # Ganchos del motor de música: tarjeta "Sonando ahora" y avisos en el canal de texto
-        music_manager.on_track_start = controls.announce_now_playing
-        music_manager.on_track_error = controls.announce_error
-        music_manager.on_player_end = controls.retire_now_playing
         # Botones y menús persistentes: siguen respondiendo tras un reinicio
-        self.add_dynamic_items(controls.NowButton, tarjetas.PageButton, ayuda.HelpMenu)
+        self.add_dynamic_items(tarjetas.PageButton, ayuda.HelpMenu)
+        # Música: /play, /radio, /queue... y la tarjeta «Sonando ahora» con botones
+        await self.add_cog(MusicaCog(self))
         # Juego diario: /palabra, /palabra-stats, /setup-palabra y el anuncio de cada día
         await self.add_cog(PalabraCog(self))
         # Cuentas vinculadas (varias cuentas de una misma persona); los niveles las usan
@@ -70,15 +69,37 @@ class MusicBot(commands.Bot):
         # Niveles: experiencia por mensajes y voz, avisos y roles de recompensa
         await self.add_cog(NivelesCog(self))
         # Eventos de voz: /evento-voz; evento de Discord automático al entrar alguien con el rol en su canal
-        # (los eventos con tarjeta y votos, eventos.py, están apagados: no se cargan)
         await self.add_cog(EventosVozCog(self))
-        # Sincroniza los comandos de barra (Slash Commands) con Discord al iniciar.
-        # Sus IDs permiten mencionarlos en los mensajes: se ven como /comando y se pueden pulsar.
-        synced = await self.tree.sync()
-        for command in synced:
+        await self.register_commands()
+
+    async def register_commands(self):
+        """
+        Sube los comandos de barra a Discord solo si han cambiado desde la última vez: Discord limita
+        cuántas veces al día se pueden subir, y un bucle de reinicios podría agotarlas. Si no han cambiado,
+        solo se piden sus IDs, que permiten mencionarlos en los mensajes (se ven como /comando y se pueden pulsar).
+        """
+        local = [command.to_dict(self.tree) for command in self.tree.get_commands()]
+        digest = hashlib.sha256(json.dumps(local, sort_keys=True).encode()).hexdigest()
+        try:
+            uploaded = SYNC_STAMP.read_text(encoding="utf-8").strip() == digest
+        except OSError:
+            uploaded = False
+
+        registered = await self.tree.fetch_commands() if uploaded else []
+        if {command.name for command in registered} != {command["name"] for command in local}:
+            # Han cambiado, o Discord no los tiene (p. ej. el TOKEN es de otro bot)
+            registered = await self.tree.sync()
+            try:
+                SYNC_STAMP.write_text(digest, encoding="utf-8")
+            except OSError as e:
+                logger.warning(f"⚠️ No pude guardar {SYNC_STAMP.name}: se volverán a subir en el próximo arranque ({e})")
+            logger.info(f"✅ {len(registered)} comandos de barra subidos a Discord: "
+                        + ", ".join(sorted(command.name for command in registered)))
+        else:
+            logger.info(f"✅ {len(registered)} comandos de barra sin cambios: no hace falta subirlos")
+
+        for command in registered:
             tarjetas.command_ids[command.name] = command.id
-        logger.info(f"✅ {len(synced)} comandos de barra registrados en Discord: "
-                    + ", ".join(sorted(command.name for command in synced)))
 
 
 bot = MusicBot()
@@ -103,34 +124,6 @@ async def on_ready():
     else:
         logger.warning("⚠️ No se encontró el canal admin; la auditoría de mensajes está desactivada. "
                        "Revisa ADMIN_LOG_CHANNEL_ID y que el bot esté en ese servidor.")
-
-
-@bot.event
-async def on_voice_state_update(member, before, after):
-    """Monitoriza cambios de estado en canales de voz (conexiones, desconexiones)."""
-    guild = member.guild
-
-    # Limpieza si el bot es expulsado/desconectado manualmente (incluida su tarjeta de botones)
-    if member.id == bot.user.id and after.channel is None:
-        player = music_manager.remove_player(guild.id)
-        if player:
-            await music_manager.notify("on_player_end", player)
-        return
-
-    vc = guild.voice_client
-    player = music_manager.peek(guild.id)
-    if vc is None or vc.channel is None or player is None:
-        return
-
-    # Auto-salida: si el canal de voz del bot se queda sin humanos, programar desconexión.
-    humans = [m for m in vc.channel.members if not m.bot]
-    if not humans:
-        if player.empty_task is None:
-            player.empty_task = asyncio.create_task(empty_channel_disconnect(vc, player))
-    elif player.empty_task is not None:
-        # Volvió alguien: cancelar la salida programada
-        player.empty_task.cancel()
-        player.empty_task = None
 
 
 # ==========================================
@@ -184,7 +177,7 @@ async def on_message(message: discord.Message):
         [s.name for s in message.stickers],
         bool(message.embeds),
     )
-    author_name = str(message.author)
+    author_name = message.author.name  # El mismo nombre que llega al editar (campo «username»)
     # Primero en memoria (instantáneo): así no se pierde ni un mensaje borrado al momento
     cache.cache_message(message.id, message.author.id, content, author_name=author_name, channel_id=message.channel.id)
     # Guardado en un hilo aparte para no bloquear el event loop del bot
@@ -310,6 +303,7 @@ async def on_raw_bulk_message_delete(payload: discord.RawBulkMessageDeleteEvent)
 @bot.tree.command(name="setup", description="Configura el canal donde el bot acepta comandos (solo admins)")
 @app_commands.guild_only()
 @app_commands.default_permissions(manage_guild=True)
+@app_commands.checks.has_permissions(manage_guild=True)
 @app_commands.describe(
     canal="Canal para los comandos del bot (déjalo vacío para ver la configuración actual)",
     quitar="Quita la restricción: los comandos funcionarán en cualquier canal",
@@ -320,11 +314,6 @@ async def setup(
         quitar: bool = False
 ):
     """Configura, por servidor, el canal de comandos autorizado. Persiste en la base de datos."""
-    if not interaction.user.guild_permissions.manage_guild:
-        return await interaction.response.send_message(
-            "❌ Necesitas el permiso **Gestionar servidor** para usar `/setup`.", ephemeral=True
-        )
-
     if quitar:
         db.clear_music_channel(interaction.guild_id)
         return await interaction.response.send_message(
@@ -355,237 +344,6 @@ async def setup(
         await interaction.response.send_message("❌ No pude guardar la configuración. Revisa los logs.", ephemeral=True)
 
 
-# ==========================================
-# COMANDOS DE REPRODUCCIÓN (SLASH COMMANDS)
-# ==========================================
-
-@bot.tree.command(name="play", description="Reproduce música de YouTube (búsqueda, enlace o playlist)")
-@app_commands.guild_only()
-@app_commands.describe(busqueda="Nombre de la canción, o enlace de YouTube / playlist")
-async def play(interaction: discord.Interaction, busqueda: str):
-    """Busca en YouTube y añade una canción o playlist a la cola del servidor."""
-    if await deny_join(interaction):
-        return
-    if "spotify.com" in busqueda or busqueda.strip().startswith("spotify:"):
-        return await interaction.response.send_message(
-            "❌ Spotify no permite reproducir su música fuera de su app. "
-            "Escribe el nombre de la canción y la busco en YouTube.", ephemeral=True
-        )
-
-    await interaction.response.defer()
-    existing = music_manager.peek(interaction.guild_id)
-    try:
-        songs = await search_youtube(busqueda, limit=existing.free_slots() if existing else MAX_QUEUE_SIZE)
-    except SearchError as e:
-        return await interaction.followup.send(f"❌ No pude abrir eso: {e}.")
-    if not songs:
-        return await interaction.followup.send("❌ No encontré resultados.")
-
-    await controls.enqueue_songs(interaction, songs)
-
-
-@bot.tree.command(name="radio", description="Sintoniza una radio española en directo")
-@app_commands.guild_only()
-@app_commands.describe(emisora="Emisora que quieres escuchar")
-@app_commands.choices(emisora=[app_commands.Choice(name=f"{r.emoji} {r.name}", value=r.key) for r in RADIOS])
-async def radio(interaction: discord.Interaction, emisora: app_commands.Choice[str]):
-    """Se conecta directamente a un flujo (stream) HTTP de una emisora de radio."""
-    if await deny_join(interaction):
-        return
-
-    await interaction.response.defer()
-    station = RADIOS_BY_KEY[emisora.value]
-    # Song con `stream_url` y marcada como radio: music.py se salta yt-dlp y conecta directamente a la emisora.
-    radio_song = Song(
-        title=station.name,
-        webpage_url=station.url,
-        thumbnail=RADIO_ICON,
-        stream_url=station.url,
-        is_radio=True
-    )
-    await controls.enqueue_songs(interaction, [radio_song])
-
-
-@bot.tree.command(name="current", description="Muestra lo que suena ahora (barra de progreso, o la canción de la radio)")
-@app_commands.guild_only()
-async def current(interaction: discord.Interaction):
-    """Muestra la pista en reproducción con su progreso; en radios, el título que emiten."""
-    player = music_manager.peek(interaction.guild_id)
-    if player is None or player.current is None:
-        return await interaction.response.send_message("🔇 No hay nada sonando ahora mismo.", ephemeral=True)
-
-    song = player.current
-    if not song.is_radio:
-        return await interaction.response.send_message(view=controls.build_current_card(player, song),
-                                                       allowed_mentions=NO_MENTIONS)
-
-    # Radio: leer el título que está emitiendo (puede tardar un par de segundos)
-    await interaction.response.defer()
-    live_title = await fetch_now_playing(song.stream_url, station_name=song.title)
-    await interaction.followup.send(view=controls.build_current_card(player, song, live_title),
-                                    allowed_mentions=NO_MENTIONS)
-
-
-@bot.tree.command(name="queue", description="Muestra lo que suena y la cola, por páginas")
-@app_commands.guild_only()
-async def queue(interaction: discord.Interaction):
-    player = music_manager.peek(interaction.guild_id)
-    if player is None or (not player.queue and not player.current):
-        return await interaction.response.send_message("📭 La cola está vacía.", ephemeral=True)
-    await interaction.response.send_message(view=controls.build_queue_card(player, interaction.user.id, 1),
-                                            allowed_mentions=NO_MENTIONS)
-
-
-@bot.tree.command(name="skip", description="Termina la pista actual y pasa a la siguiente")
-@app_commands.guild_only()
-async def skip(interaction: discord.Interaction):
-    if await deny_control(interaction):
-        return
-    skipped = controls.request_skip(interaction.guild)
-    if skipped is None:
-        return await interaction.response.send_message("❌ No hay nada sonando.", ephemeral=True)
-    await interaction.response.send_message(controls.skip_text(interaction.user, skipped), allowed_mentions=NO_MENTIONS)
-
-
-# /pause, /resume, /loop y /volume contestan solo a quien los usa: la tarjeta «Sonando ahora»
-# ya enseña al canal el cambio y quién lo ha hecho.
-
-@bot.tree.command(name="pause", description="Pausa la reproducción actual")
-@app_commands.guild_only()
-async def pause(interaction: discord.Interaction):
-    if await deny_control(interaction):
-        return
-    if not controls.pause(interaction.guild):
-        return await interaction.response.send_message("❌ No hay nada sonando.", ephemeral=True)
-    controls.note_action(interaction.guild, f"⏸️ Pausada por {interaction.user.mention}")
-    await interaction.response.send_message("⏸️ Pausada. Sigue con /resume o con el botón de la tarjeta.",
-                                            ephemeral=True)
-    await controls.refresh_card(interaction.guild)
-
-
-@bot.tree.command(name="resume", description="Reanuda la reproducción pausada")
-@app_commands.guild_only()
-async def resume(interaction: discord.Interaction):
-    if await deny_control(interaction):
-        return
-    if not controls.resume(interaction.guild):
-        return await interaction.response.send_message("❌ No hay nada pausado.", ephemeral=True)
-    controls.note_action(interaction.guild, f"▶️ Reanudada por {interaction.user.mention}")
-    await interaction.response.send_message("▶️ Reanudada.", ephemeral=True)
-    await controls.refresh_card(interaction.guild)
-
-
-@bot.tree.command(name="loop", description="Configura el modo de repetición (Bucle)")
-@app_commands.guild_only()
-@app_commands.choices(modo=[
-    app_commands.Choice(name="⛔ Desactivado", value=0),
-    app_commands.Choice(name="🔂 Canción Actual", value=1),
-    app_commands.Choice(name="🔁 Toda la Cola", value=2)
-])
-async def loop(interaction: discord.Interaction, modo: app_commands.Choice[int]):
-    if await deny_control(interaction):
-        return
-
-    player = music_manager.get_player(interaction.guild)
-    player.loop_mode = modo.value
-    controls.note_action(interaction.guild, controls.loop_action(interaction.user, modo.value))
-
-    msgs = {LOOP_OFF: "➡️ Bucle **quitado**.", LOOP_CURRENT: "🔂 Se repetirá la **canción actual**."}
-    await interaction.response.send_message(msgs.get(modo.value, "🔁 Se repetirá **toda la cola**."), ephemeral=True)
-    await controls.refresh_card(interaction.guild)
-
-
-@bot.tree.command(name="shuffle", description="Mezcla de forma aleatoria la cola de reproducción")
-@app_commands.guild_only()
-async def shuffle(interaction: discord.Interaction):
-    if await deny_control(interaction):
-        return
-
-    player = music_manager.peek(interaction.guild_id)
-    if player is None or len(player.queue) < 2:
-        return await interaction.response.send_message("❌ Necesitas al menos 2 canciones en la cola.", ephemeral=True)
-
-    player.shuffle_queue()
-    await interaction.response.send_message(
-        f"🔀 {interaction.user.mention} ha mezclado la cola (**{len(player.queue)}** canciones).",
-        allowed_mentions=NO_MENTIONS
-    )
-
-
-@bot.tree.command(name="remove", description="Quita una canción de la cola por su número (mira /queue)")
-@app_commands.guild_only()
-@app_commands.describe(posicion="Número de la canción en la cola")
-async def remove(interaction: discord.Interaction, posicion: int):
-    if await deny_control(interaction):
-        return
-    player = music_manager.peek(interaction.guild_id)
-    if player is None or not player.queue:
-        return await interaction.response.send_message("📭 La cola está vacía.", ephemeral=True)
-    if posicion < 1 or posicion > len(player.queue):
-        return await interaction.response.send_message(
-            f"❌ Número inválido. La cola tiene **{len(player.queue)}** canciones.", ephemeral=True
-        )
-
-    removed = player.remove_at(posicion - 1)
-    if removed:
-        await interaction.response.send_message(
-            f"🗑️ {interaction.user.mention} ha quitado **{controls.song_label(removed, link=False)}** de la cola.",
-            allowed_mentions=NO_MENTIONS
-        )
-        await controls.refresh_card(interaction.guild)
-    else:
-        await interaction.response.send_message("❌ No pude quitar esa canción.", ephemeral=True)
-
-
-@bot.tree.command(name="volume", description="Ajusta el volumen de reproducción (0-100)")
-@app_commands.guild_only()
-@app_commands.describe(nivel="Volumen de 0 a 100")
-async def volume(interaction: discord.Interaction, nivel: app_commands.Range[int, 0, 100]):
-    if await deny_control(interaction):
-        return
-    player = music_manager.get_player(interaction.guild)
-    player.volume = nivel / 100
-
-    # Aplicar en vivo si hay algo sonando
-    vc = interaction.guild.voice_client
-    if vc and vc.source and isinstance(vc.source, discord.PCMVolumeTransformer):
-        vc.source.volume = player.volume
-
-    controls.note_action(interaction.guild, f"🔊 Volumen puesto al {nivel}% por {interaction.user.mention}")
-    await interaction.response.send_message(f"🔊 Volumen al **{nivel}%**.", ephemeral=True)
-    await controls.refresh_card(interaction.guild)
-
-
-@bot.tree.command(name="clear", description="Vacía la cola (sin cortar la canción que suena ahora)")
-@app_commands.guild_only()
-async def clear(interaction: discord.Interaction):
-    if await deny_control(interaction):
-        return
-    player = music_manager.peek(interaction.guild_id)
-    count = len(player.queue) if player else 0
-    if count == 0:
-        return await interaction.response.send_message("📭 La cola ya está vacía.", ephemeral=True)
-
-    player.clear_queue()
-    await interaction.response.send_message(
-        f"🧹 {interaction.user.mention} ha vaciado la cola (**{count}** "
-        f"{'canción' if count == 1 else 'canciones'}). La que suena sigue.",
-        allowed_mentions=NO_MENTIONS
-    )
-    await controls.refresh_card(interaction.guild)
-
-
-@bot.tree.command(name="stop", description="Detiene la música, limpia la cola y expulsa al bot")
-@app_commands.guild_only()
-async def stop(interaction: discord.Interaction):
-    if await deny_control(interaction):
-        return
-    if interaction.guild.voice_client is None:
-        return await interaction.response.send_message("❌ No estoy conectado.", ephemeral=True)
-    await interaction.response.send_message(controls.stop_text(interaction.user), allowed_mentions=NO_MENTIONS)
-    await disconnect_player(interaction.guild)
-
-
 @bot.tree.command(name="help", description="Muestra la lista de comandos del bot")
 @app_commands.guild_only()
 async def help_cmd(interaction: discord.Interaction):
@@ -600,7 +358,9 @@ async def on_app_command_error(interaction: discord.Interaction, error: app_comm
     if isinstance(error, app_commands.NoPrivateMessage):
         message = "❌ Este comando solo funciona dentro de un servidor."
     elif isinstance(error, app_commands.MissingPermissions):
-        message = "❌ No tienes permisos para usar este comando."
+        names = ", ".join(PERMISSION_NAMES.get(name, name) for name in error.missing_permissions)
+        command = f" para usar `/{interaction.command.qualified_name}`" if interaction.command else ""
+        message = f"❌ Necesitas el permiso **{names}**{command}."
     else:
         command = interaction.command.name if interaction.command else "?"
         logger.error(f"Error en /{command}", exc_info=getattr(error, "original", error))

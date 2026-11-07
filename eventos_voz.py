@@ -8,7 +8,8 @@ icono del servidor). No escribe ni menciona a nadie.
   bot lo termina, sin esperar.
 - Si el bot se reinicia, recupera los eventos que dejó en directo y repasa los canales.
 
-Sustituye a los eventos con tarjeta y votos (eventos.py), que se conservan apagados.
+Sustituye a los eventos con tarjeta y votos (eventos.py), que se borraron el 2026-11-07: siguen en el
+historial de git.
 """
 
 import asyncio
@@ -24,11 +25,11 @@ from discord.utils import escape_markdown
 
 import db
 import tarjetas
+from tarjetas import NO_MENTIONS
 
 logger = logging.getLogger(__name__)
 
 START_DELAY = timedelta(minutes=1)  # Discord no deja crearlo con la hora ya pasada: se crea a un minuto y se inicia ya
-NO_MENTIONS = discord.AllowedMentions.none()
 
 
 # ==========================================
@@ -205,15 +206,12 @@ class EventosVozCog(commands.Cog):
                                       "(solo admins)")
     @app_commands.guild_only()
     @app_commands.default_permissions(manage_guild=True)
+    @app_commands.checks.has_permissions(manage_guild=True)
     @app_commands.describe(canal="Canal de voz (vacío = ver los que hay)",
                            rol="Al entrar alguien con este rol, se crea un evento con su nombre",
                            quitar="Que ese canal deje de crear eventos")
     async def evento_voz(self, interaction: discord.Interaction, canal: Optional[discord.VoiceChannel] = None,
                          rol: Optional[discord.Role] = None, quitar: bool = False):
-        if not interaction.user.guild_permissions.manage_guild:
-            return await interaction.response.send_message(
-                "❌ Necesitas el permiso **Gestionar servidor** para usar `/evento-voz`.", ephemeral=True
-            )
         guild = interaction.guild
         if canal is None:
             return await interaction.response.send_message(view=self._list_card(guild), ephemeral=True,

@@ -185,31 +185,6 @@ def get_messages(message_ids: Iterable[int]) -> Dict[int, dict]:
     return found
 
 
-def delete_old_messages(days: int = 30) -> int:
-    """
-    Elimina mensajes antiguos de la base de datos.
-
-    Args:
-        days: Número de días a mantener.
-
-    Returns:
-        int: Número de mensajes eliminados.
-    """
-    try:
-        with get_db_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute(
-                "DELETE FROM mensajes WHERE created_at < datetime('now', ? || ' days')",
-                (f'-{days}',)
-            )
-            deleted_count = cursor.rowcount
-        logger.info(f"Eliminados {deleted_count} mensajes antiguos")
-        return deleted_count
-    except Exception as e:
-        logger.error(f"Error al eliminar mensajes antiguos: {e}")
-        return 0
-
-
 # ==========================================
 # CONFIGURACIÓN POR SERVIDOR (comando /setup)
 # ==========================================

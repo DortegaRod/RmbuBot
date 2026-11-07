@@ -56,3 +56,5 @@ ffmpeg
 ffmpeg.exe
 ffprobe
 ffprobe.exe
+# Huella de los comandos de barra subidos a Discord (bot.py)
+.comandos_sincronizados

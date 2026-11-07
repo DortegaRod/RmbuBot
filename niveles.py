@@ -32,6 +32,7 @@ from discord.utils import escape_markdown
 import cuentas
 import db
 import tarjetas
+from tarjetas import NO_MENTIONS
 
 logger = logging.getLogger(__name__)
 
@@ -332,19 +333,6 @@ def plan_import(guild_id: int, members: List[discord.Member], entries: List[Tupl
 # COMANDOS Y CONTADORES
 # ==========================================
 
-def _is_admin(interaction: discord.Interaction) -> bool:
-    return interaction.user.guild_permissions.manage_guild
-
-
-async def _deny_non_admin(interaction: discord.Interaction, command: str) -> bool:
-    if _is_admin(interaction):
-        return False
-    await interaction.response.send_message(
-        f"❌ Necesitas el permiso **Gestionar servidor** para usar `{command}`.", ephemeral=True
-    )
-    return True
-
-
 def _progress_bar(fraction: float, length: int = 14) -> str:
     filled = max(0, min(length, round(fraction * length)))
     return "█" * filled + "░" * (length - filled)
@@ -560,7 +548,7 @@ class NivelesCog(commands.Cog):
                 f"{tarjetas.cmd('setup-niveles')}).", ephemeral=True
             )
         card = self.nivel_card(interaction.guild, usuario or interaction.user)
-        await interaction.response.send_message(view=card, allowed_mentions=discord.AllowedMentions.none())
+        await interaction.response.send_message(view=card, allowed_mentions=NO_MENTIONS)
 
     def ranking_card(self, guild: discord.Guild, owner_id: int, page: Union[int, str]) -> Union[tarjetas.Card, str]:
         """
@@ -610,20 +598,19 @@ class NivelesCog(commands.Cog):
                 "📈 Los niveles no están activados en este servidor.", ephemeral=True
             )
         card = self.ranking_card(interaction.guild, interaction.user.id, pagina)
-        await interaction.response.send_message(view=card, allowed_mentions=discord.AllowedMentions.none())
+        await interaction.response.send_message(view=card, allowed_mentions=NO_MENTIONS)
 
     # ---------- Comandos de admins ----------
 
     @app_commands.command(name="setup-niveles", description="Activa los niveles y elige el canal de avisos (solo admins)")
     @app_commands.guild_only()
     @app_commands.default_permissions(manage_guild=True)
+    @app_commands.checks.has_permissions(manage_guild=True)
     @app_commands.describe(canal="Canal donde se anuncian las subidas de nivel (vacío = ver la configuración)",
                            quitar="Deja de contar experiencia en este servidor (no se borra la que hay)")
     async def setup_niveles(self, interaction: discord.Interaction,
                             canal: Optional[Union[discord.TextChannel, discord.VoiceChannel]] = None,
                             quitar: bool = False):
-        if await _deny_non_admin(interaction, "/setup-niveles"):
-            return
         guild = interaction.guild
         if quitar:
             await asyncio.to_thread(save_channel, guild.id, None)
@@ -633,7 +620,7 @@ class NivelesCog(commands.Cog):
             )
         if canal is None:
             return await interaction.response.send_message(view=self._settings_card(guild), ephemeral=True,
-                                                           allowed_mentions=discord.AllowedMentions.none())
+                                                           allowed_mentions=NO_MENTIONS)
         perms = canal.permissions_for(guild.me)
         if not (perms.view_channel and perms.send_messages):
             return await interaction.response.send_message(
@@ -669,12 +656,11 @@ class NivelesCog(commands.Cog):
                           description="Multiplica la experiencia de los mensajes en un canal (solo admins)")
     @app_commands.guild_only()
     @app_commands.default_permissions(manage_guild=True)
+    @app_commands.checks.has_permissions(manage_guild=True)
     @app_commands.describe(canal="Canal", valor="Multiplicador (1 = quitarlo)")
     async def multiplicador(self, interaction: discord.Interaction,
                             canal: Union[discord.TextChannel, discord.VoiceChannel],
                             valor: app_commands.Range[int, 1, 100]):
-        if await _deny_non_admin(interaction, "/niveles-multiplicador"):
-            return
         await asyncio.to_thread(save_multiplier, interaction.guild_id, canal.id, valor)
         self.reload_settings()
         await interaction.response.send_message(
@@ -686,12 +672,11 @@ class NivelesCog(commands.Cog):
                           description="Añade o quita un rol de recompensa por nivel (solo admins)")
     @app_commands.guild_only()
     @app_commands.default_permissions(manage_guild=True)
+    @app_commands.checks.has_permissions(manage_guild=True)
     @app_commands.describe(nivel="Nivel al que se da el rol", rol="Rol de recompensa",
                            quitar="Quita esta recompensa (no le quita el rol a quien ya lo tenga)")
     async def recompensa(self, interaction: discord.Interaction, nivel: app_commands.Range[int, 1, 1000],
                          rol: discord.Role, quitar: bool = False):
-        if await _deny_non_admin(interaction, "/niveles-recompensa"):
-            return
         guild = interaction.guild
         if rol.is_default() or rol.managed:
             return await interaction.response.send_message(
@@ -701,15 +686,15 @@ class NivelesCog(commands.Cog):
         self.reload_settings()
         if quitar:
             return await interaction.response.send_message(
-                f"✅ El nivel {nivel} ya no da {rol.mention}.", allowed_mentions=discord.AllowedMentions.none()
+                f"✅ El nivel {nivel} ya no da {rol.mention}.", allowed_mentions=NO_MENTIONS
             )
         text = f"✅ Al llegar al **nivel {nivel}** se dará {rol.mention}."
         if not guild.me.guild_permissions.manage_roles:
             text += "\n⚠️ Falta darle al bot el permiso **Gestionar roles**."
-            return await interaction.response.send_message(text, allowed_mentions=discord.AllowedMentions.none())
+            return await interaction.response.send_message(text, allowed_mentions=NO_MENTIONS)
         if rol >= guild.me.top_role:
             text += f"\n⚠️ Sube el rol del bot por encima de {rol.mention} en la lista de roles, o no podrá darlo."
-            return await interaction.response.send_message(text, allowed_mentions=discord.AllowedMentions.none())
+            return await interaction.response.send_message(text, allowed_mentions=NO_MENTIONS)
 
         # Quien ya tenga ese nivel lo recibe ahora, sin esperar a volver a subir
         await interaction.response.defer()
@@ -721,20 +706,19 @@ class NivelesCog(commands.Cog):
                 people.add(cuentas.principal_of(guild.id, shown.id))
         if people:
             text += f"\n🏆 Se lo he dado ya a **{len(people)}** {'persona' if len(people) == 1 else 'personas'} con ese nivel."
-        await interaction.followup.send(text, allowed_mentions=discord.AllowedMentions.none())
+        await interaction.followup.send(text, allowed_mentions=NO_MENTIONS)
 
     @app_commands.command(name="niveles-ajustar",
                           description="Pone a alguien una experiencia o un nivel exactos (solo admins)")
     @app_commands.guild_only()
     @app_commands.default_permissions(manage_guild=True)
+    @app_commands.checks.has_permissions(manage_guild=True)
     @app_commands.describe(usuario="A quién (si tiene cuentas vinculadas, es el total de la persona)",
                            exp="Experiencia total exacta",
                            nivel="O bien un nivel: se pone la experiencia justa para tenerlo")
     async def ajustar(self, interaction: discord.Interaction, usuario: discord.Member,
                       exp: Optional[app_commands.Range[int, 0, 100_000_000]] = None,
                       nivel: Optional[app_commands.Range[int, 0, 1000]] = None):
-        if await _deny_non_admin(interaction, "/niveles-ajustar"):
-            return
         if (exp is None) == (nivel is None):
             return await interaction.response.send_message("❌ Indica `exp` **o** `nivel` (uno de los dos).",
                                                            ephemeral=True)
@@ -743,17 +727,16 @@ class NivelesCog(commands.Cog):
         await self.sync_person(interaction.guild, usuario.id, level_for_xp(xp))
         await interaction.response.send_message(
             f"✅ {usuario.mention} tiene ahora **{_fmt(xp)}** de experiencia (nivel **{level_for_xp(xp)}**).",
-            allowed_mentions=discord.AllowedMentions.none()
+            allowed_mentions=NO_MENTIONS
         )
 
     @app_commands.command(name="niveles-importar",
                           description="Importa la clasificación copiada de la web de Amari (solo admins)")
     @app_commands.guild_only()
     @app_commands.default_permissions(manage_guild=True)
+    @app_commands.checks.has_permissions(manage_guild=True)
     @app_commands.describe(archivo="Archivo .txt con la clasificación de Amari copiada tal cual")
     async def importar(self, interaction: discord.Interaction, archivo: discord.Attachment):
-        if await _deny_non_admin(interaction, "/niveles-importar"):
-            return
         if archivo.size > MAX_IMPORT_BYTES:
             return await interaction.response.send_message("❌ El archivo es demasiado grande.", ephemeral=True)
         await interaction.response.defer(ephemeral=True)

@@ -20,10 +20,10 @@ from discord.utils import escape_markdown
 
 import db
 import tarjetas
+from tarjetas import NO_MENTIONS
 
 logger = logging.getLogger(__name__)
 
-NO_MENTIONS = discord.AllowedMentions.none()
 REQUEST_TIMEOUT = 600  # Segundos que tiene la otra cuenta para confirmar
 
 _SCHEMA = """CREATE TABLE IF NOT EXISTS cuentas_vinculadas (
@@ -223,14 +223,11 @@ class CuentasCog(commands.Cog):
                           description="Vincula cuentas de la misma persona sin pedir confirmación (solo admins)")
     @app_commands.guild_only()
     @app_commands.default_permissions(manage_guild=True)
+    @app_commands.checks.has_permissions(manage_guild=True)
     @app_commands.describe(principal="Cuenta principal de la persona", cuenta="Otra cuenta suya",
                            otra_cuenta="Otra más, si tiene tres")
     async def vincular_cuentas(self, interaction: discord.Interaction, principal: discord.Member,
                                cuenta: discord.Member, otra_cuenta: Optional[discord.Member] = None):
-        if not interaction.user.guild_permissions.manage_guild:
-            return await interaction.response.send_message(
-                "❌ Necesitas el permiso **Gestionar servidor** para usar `/vincular-cuentas`.", ephemeral=True
-            )
         others = [m for m in (cuenta, otra_cuenta) if m is not None and m.id != principal.id and not m.bot]
         if not others or principal.bot:
             return await interaction.response.send_message("❌ Indica al menos dos cuentas distintas (que no sean bots).",

@@ -8,6 +8,7 @@ from datetime import timezone
 import discord
 
 import tarjetas
+from tarjetas import NO_MENTIONS
 
 logger = logging.getLogger(__name__)
 
@@ -17,7 +18,6 @@ try:
 except Exception:  # Windows sin el paquete tzdata
     LOCAL_TZ = timezone.utc
 
-NO_MENTIONS = discord.AllowedMentions.none()
 TEXT_LIMIT = 1500  # Caracteres de cada texto citado (la tarjeta entera admite 4000)
 TRANSCRIPT_FILE = "borrado_masivo.txt"
 

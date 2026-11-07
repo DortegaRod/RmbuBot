@@ -16,13 +16,13 @@ from discord.utils import escape_markdown
 
 import db
 import tarjetas
+from tarjetas import NO_MENTIONS
 from config import MAX_QUEUE_SIZE
 from music import (music_manager, disconnect_player, play_next, MusicPlayer, Song, LOOP_LABELS,
                    LOOP_OFF, LOOP_CURRENT)
 
 logger = logging.getLogger(__name__)
 
-NO_MENTIONS = discord.AllowedMentions.none()
 QUEUE_PAGE_SIZE = 10
 
 # Última acción sobre la música de cada servidor («⏸️ Pausada por @x»): la tarjeta la enseña

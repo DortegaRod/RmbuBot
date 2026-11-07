@@ -98,34 +98,3 @@ def remove_cached(message_id: int) -> bool:
     except Exception as e:
         logger.error(f"Error al eliminar del cache mensaje {message_id}: {e}")
         return False
-
-
-def clear_cache() -> int:
-    """
-    Limpia todo el cache.
-
-    Returns:
-        Número de elementos eliminados
-    """
-    try:
-        count = len(_message_cache)
-        _message_cache.clear()
-        logger.info(f"Cache limpiado: {count} mensajes eliminados")
-        return count
-    except Exception as e:
-        logger.error(f"Error al limpiar el cache: {e}")
-        return 0
-
-
-def get_cache_stats() -> dict:
-    """
-    Obtiene estadísticas del cache.
-
-    Returns:
-        Diccionario con estadísticas del cache
-    """
-    return {
-        "size": len(_message_cache),
-        "max_size": CACHE_MAX,
-        "usage_percent": (len(_message_cache) / CACHE_MAX * 100) if CACHE_MAX > 0 else 0
-    }

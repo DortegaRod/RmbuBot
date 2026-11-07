@@ -28,6 +28,7 @@ from discord.utils import escape_markdown
 
 import db
 import tarjetas
+from tarjetas import NO_MENTIONS
 
 logger = logging.getLogger(__name__)
 
@@ -44,7 +45,6 @@ DATA_DIR = Path(__file__).parent / "datos"
 
 GREEN, YELLOW, GRAY, EMPTY = "🟩", "🟨", "⬛", "⬜"
 HIDDEN = EMPTY  # Primera fila de los resultados publicados (tapada, como las filas vacías del tablero)
-NO_MENTIONS = discord.AllowedMentions.none()
 
 VALID_WORDS: set = set()  # Palabras aceptadas como intento (normalizadas: sin tildes)
 ANSWERS: List[str] = []   # Posibles palabras del día, escritas con sus tildes
@@ -629,6 +629,7 @@ class PalabraCog(commands.Cog):
     @app_commands.command(name="setup-palabra", description="Canal, hora y rol del anuncio diario de la palabra (solo admins)")
     @app_commands.guild_only()
     @app_commands.default_permissions(manage_guild=True)
+    @app_commands.checks.has_permissions(manage_guild=True)
     @app_commands.describe(
         canal="Canal del juego: anuncio diario y resultados (vacío = ver la configuración)",
         hora="Hora del anuncio diario, de 0 a 23 (hora de España). Por defecto, las 10",
@@ -645,10 +646,6 @@ class PalabraCog(commands.Cog):
             quitar_rol: bool = False,
             quitar: bool = False
     ):
-        if not interaction.user.guild_permissions.manage_guild:
-            return await interaction.response.send_message(
-                "❌ Necesitas el permiso **Gestionar servidor** para usar `/setup-palabra`.", ephemeral=True
-            )
         if quitar:
             clear_config(interaction.guild_id)
             return await interaction.response.send_message(
