@@ -114,7 +114,7 @@ class PerfilCog(commands.Cog):
                       f"-# {monedas.fmt_number(xp)} de experiencia en total")
 
         card.separator()
-        card.text(f"**Bolsa**  {monedas.format_money(money)}")
+        card.text(f"**Bolsa**  {monedas.format_money(money)}\n-# Valor total: {monedas.format_total(money)}")
         if len(group) > 1:
             card.note("Cuentas vinculadas: " + " · ".join(f"<@{user_id}>" for user_id in group))
         return card

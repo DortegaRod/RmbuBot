@@ -47,6 +47,16 @@ def _coin(name: str, amount: int) -> str:
     return f"{tarjetas.emoji(name)} **{fmt_number(amount)}**" + ("" if tarjetas.has_emoji(name) else f" {name}")
 
 
+def format_total(cobre: int) -> str:
+    """
+    Todo el saldo en oro, para comparar de un vistazo: 183000 -> '18,30 de oro'. Los decimales salen solo
+    si hacen falta: 2 si hay plata, 4 si hay cobre suelto (1 oro = 100 de plata = 10.000 de cobre).
+    """
+    gold, rest = divmod(cobre, ORO)
+    decimals = "" if rest == 0 else f",{rest // PLATA:02d}" if rest % PLATA == 0 else f",{rest:04d}"
+    return f"{fmt_number(gold)}{decimals} de oro"
+
+
 def level_rewards(from_level: int, to_level: int) -> int:
     """Cobre que dan los niveles de from_level + 1 a to_level (el nivel N da N de plata)."""
     def total(level: int) -> int:
