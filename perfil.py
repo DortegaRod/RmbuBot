@@ -28,6 +28,7 @@ from tarjetas import NO_MENTIONS
 logger = logging.getLogger(__name__)
 
 PODIUM = {1: "🥇", 2: "🥈", 3: "🥉"}  # Medalla del puesto en el ranking (los demás, 🏅)
+tarjetas.register_emoji("bolsa", ("pouch", "bolsa"), "🎒")  # Icono de la bolsa (emoji propio; si falta, 🎒)
 
 
 # ==========================================
@@ -113,13 +114,13 @@ class PerfilCog(commands.Cog):
                         if index is not None else "")
             card.separator()
             # El nivel como subtítulo: es lo que más se mira, que se vea grande
-            card.text(f"### ⭐ Nivel {niveles.level_for_xp(xp)}{position}\n{niveles.level_progress(xp)}\n"
+            card.text(f"### 📈 Nivel {niveles.level_for_xp(xp)}{position}\n{niveles.level_progress(xp)}\n"
                       f"-# ✨ {monedas.fmt_number(xp)} de experiencia en total")
 
         card.separator()
         # El valor total en cobre, para comparar; si solo hay cobre, repetiría lo mismo
         total = f"{tarjetas.FIELD_SEP}{monedas.format_total(money)}" if money >= monedas.PLATA else ""
-        card.text(f"🎒 **Bolsa**  {monedas.format_money(money)}{total}")
+        card.text(f"{tarjetas.emoji('bolsa')} **Bolsa**  {monedas.format_money(money)}{total}")
         if len(group) > 1:
             card.note("🔗 Cuentas vinculadas: " + " · ".join(f"<@{user_id}>" for user_id in group))
         return card
