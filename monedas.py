@@ -48,13 +48,8 @@ def _coin(name: str, amount: int) -> str:
 
 
 def format_total(cobre: int) -> str:
-    """
-    Todo el saldo en oro, para comparar de un vistazo: 183000 -> '18,30 de oro'. Los decimales salen solo
-    si hacen falta: 2 si hay plata, 4 si hay cobre suelto (1 oro = 100 de plata = 10.000 de cobre).
-    """
-    gold, rest = divmod(cobre, ORO)
-    decimals = "" if rest == 0 else f",{rest // PLATA:02d}" if rest % PLATA == 0 else f",{rest:04d}"
-    return f"{fmt_number(gold)}{decimals} de oro"
+    """Todo el saldo en cobre, para comparar de un vistazo: 183000 -> '183.000 de cobre'."""
+    return f"{fmt_number(cobre)} de cobre"
 
 
 def level_rewards(from_level: int, to_level: int) -> int:
