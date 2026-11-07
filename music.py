@@ -35,6 +35,8 @@ LOOP_LABELS = {LOOP_OFF: "No", LOOP_CURRENT: "🔂 Canción", LOOP_QUEUE: "🔁 
 STREAM_URL_TTL = 60 * 60       # Las URLs de audio de YouTube caducan: se re-extraen pasada 1 hora
 MAX_CONSECUTIVE_FAILURES = 5   # Canciones seguidas que no cargan antes de dejar de intentarlo
 FAST_FAIL_SECONDS = 2.0        # Si una pista "termina" antes de esto, FFmpeg no pudo reproducirla
+SEARCH_CANDIDATES = 5          # Resultados de YouTube entre los que se elige la versión de una canción de Spotify
+DURATION_TOLERANCE = 10        # Segundos de diferencia con la duración de Spotify que se dan por buenos
 
 
 # ==========================================
@@ -124,6 +126,7 @@ class Song:
     stream_fetched_at: Optional[float] = None  # Cuándo se extrajo stream_url (reloj monotónico)
     user_agent: Optional[str] = None  # User-Agent con el que yt-dlp obtuvo la URL (FFmpeg debe usar el mismo)
     retried: bool = False  # Ya se reintentó una vez tras cortarse nada más empezar
+    search_query: Optional[str] = None  # Canciones de Spotify: se buscan en YouTube justo antes de sonar
 
     def __str__(self):
         return self.title
@@ -438,8 +441,45 @@ def _friendly_error(error: Exception) -> str:
     return text[:180]
 
 
+async def _resolve_search(song: Song) -> Optional[str]:
+    """
+    Canciones de Spotify: busca «Artistas - Título» en YouTube y elige, de los primeros resultados, el
+    primero que dura lo mismo que en Spotify (así se evitan videoclips con intro, directos y versiones
+    extendidas); si ninguno, el primero. Devuelve el motivo si no se encontró nada.
+    """
+    logger.info(f"Buscando en YouTube: {song.search_query}")
+    options = dict(YDL_SEARCH_OPTIONS, playlist_items=f"1-{SEARCH_CANDIDATES}")
+
+    def extract():
+        with yt_dlp.YoutubeDL(options) as ydl:
+            return ydl.extract_info(f"ytsearch{SEARCH_CANDIDATES}:{song.search_query}", download=False)
+
+    try:
+        info = await asyncio.to_thread(extract)
+    except Exception as e:
+        return _friendly_error(e)
+    found = [result for result in map(_entry_to_song, [e for e in (info or {}).get('entries') or [] if e])
+             if result]
+    if not found:
+        return "no la encontré en YouTube"
+
+    best = found[0]
+    if song.duration:
+        same_length = [result for result in found
+                       if result.duration and abs(result.duration - song.duration) <= DURATION_TOLERANCE]
+        best = same_length[0] if same_length else best
+    song.webpage_url = best.webpage_url  # Desde aquí es una canción de YouTube más (bucles, reintentos...)
+    song.duration = best.duration or song.duration  # La barra de progreso, con la duración de lo que suena
+    song.search_query = None
+    return None
+
+
 async def _prepare_stream(song: Song) -> Optional[str]:
     """Garantiza que la canción tenga una URL de audio válida. Devuelve el motivo si no se pudo."""
+    if song.search_query:
+        error = await _resolve_search(song)
+        if error:
+            return error
     if song.has_fresh_stream():
         return None
     if song.is_radio:

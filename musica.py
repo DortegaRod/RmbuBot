@@ -11,6 +11,7 @@ from discord import app_commands
 from discord.ext import commands
 
 import controls
+import spotify
 from config import MAX_QUEUE_SIZE
 from controls import deny_control, deny_join
 from music import (
@@ -70,23 +71,22 @@ class MusicaCog(commands.Cog):
 
     # ---------- Poner música ----------
 
-    @app_commands.command(name="play", description="Reproduce música de YouTube (búsqueda, enlace o playlist)")
+    @app_commands.command(name="play", description="Reproduce música de YouTube o Spotify (búsqueda, enlace o playlist)")
     @app_commands.guild_only()
-    @app_commands.describe(busqueda="Nombre de la canción, o enlace de YouTube / playlist")
+    @app_commands.describe(busqueda="Nombre de la canción, o enlace de YouTube o Spotify (canción, álbum o playlist)")
     async def play(self, interaction: discord.Interaction, busqueda: str):
-        """Busca en YouTube y añade una canción o playlist a la cola del servidor."""
+        """
+        Busca en YouTube y añade una canción o playlist a la cola del servidor. Los enlaces de Spotify
+        se leen de Spotify y cada canción se busca en YouTube al ir a sonar (spotify.py).
+        """
         if await deny_join(interaction):
             return
-        if "spotify.com" in busqueda or busqueda.strip().startswith("spotify:"):
-            return await interaction.response.send_message(
-                "❌ Spotify no permite reproducir su música fuera de su app. "
-                "Escribe el nombre de la canción y la busco en YouTube.", ephemeral=True
-            )
 
         await interaction.response.defer()
+        search = spotify.fetch_songs if spotify.is_spotify(busqueda) else search_youtube
         existing = music_manager.peek(interaction.guild_id)
         try:
-            songs = await search_youtube(busqueda, limit=existing.free_slots() if existing else MAX_QUEUE_SIZE)
+            songs = await search(busqueda, limit=existing.free_slots() if existing else MAX_QUEUE_SIZE)
         except SearchError as e:
             return await interaction.followup.send(f"❌ No pude abrir eso: {e}.")
         if not songs:

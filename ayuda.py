@@ -16,7 +16,7 @@ from tarjetas import cmd
 def _music() -> str:
     return (
         "## 🎵 Música\n"
-        f"{cmd('play')} — Pon una canción o playlist de YouTube (búsqueda o enlace)\n"
+        f"{cmd('play')} — Pon una canción o playlist de YouTube o Spotify (búsqueda o enlace)\n"
         f"{cmd('radio')} — Una radio española en directo\n"
         f"{cmd('current')} — Lo que suena, con su progreso (en radios, la canción que emiten)\n"
         f"{cmd('queue')} — La cola, por páginas\n"
@@ -29,6 +29,7 @@ def _music() -> str:
         f"{cmd('volume')} — Volumen de 0 a 100\n"
         f"{cmd('stop')} — Para la música y saca al bot\n"
         "-# Cada canción sale en una tarjeta con botones para pausar, saltar, parar y poner bucle.\n"
+        "-# De Spotify se buscan sus canciones en YouTube (de las playlists, las 100 primeras).\n"
         "-# Para controlar la música tienes que estar en su canal de voz (los moderadores, desde cualquier sitio)."
     )
 
@@ -71,7 +72,7 @@ def _admin() -> str:
 
 # Sección -> (emoji, nombre, descripción en el menú, texto)
 SECTIONS: Dict[str, Tuple[str, str, str, Callable[[], str]]] = {
-    "musica": ("🎵", "Música", "YouTube y radios, con botones en cada canción", _music),
+    "musica": ("🎵", "Música", "YouTube, Spotify y radios, con botones en cada canción", _music),
     "palabra": ("🟩", "Palabra del día", "El Wordle en español, con rachas", _palabra),
     "niveles": ("📈", "Niveles", "Experiencia por escribir y estar en voz", _niveles),
     "admin": ("⚙️", "Administración", "Configuración del bot (solo admins)", _admin),
