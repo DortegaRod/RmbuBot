@@ -46,7 +46,7 @@ def _palabra() -> str:
 def _gremio() -> str:
     return (
         "## 📜 Gremio\n"
-        f"{cmd('perfil')} — Tu título, nivel, puesto, monedas y desde cuándo estás (o los de otra persona)\n"
+        f"{cmd('perfil')} — Tu título, nivel, puesto y antigüedad, con tu inventario y tu forja (o el perfil de otra persona)\n"
         f"{cmd('craftear')} — Tu forja: craftea plata y oro con tus monedas, o fúndelas\n"
         f"{cmd('ranking')} — La clasificación del gremio\n"
         f"{cmd('vincular')} — Une otra cuenta tuya: vuestra experiencia se suma\n"

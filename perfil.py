@@ -1,12 +1,12 @@
 """
-Perfil de personaje (/perfil): título, nivel, puesto, monedas y desde cuándo está la persona en el servidor.
+Perfil de personaje (/perfil): título, nivel, puesto y desde cuándo está la persona en el servidor.
 
 - El título es un rol. Los admins marcan con /titulos qué roles lo son, y sale el más alto (en la lista
   de roles del servidor) de esos que tenga la persona. Sin ninguno, el perfil no lleva título.
-- El nivel y el puesto salen si los niveles están activados en el servidor (niveles.py); las monedas,
-  siempre (monedas.py).
+- El nivel y el puesto salen si los niveles están activados en el servidor (niveles.py).
+- Las monedas no salen en el perfil: en el propio, los botones 🎒 Inventario y ⚒️ Forja abren las
+  tarjetas privadas de forja.py.
 - Las cuentas vinculadas comparten nivel y monedas; la fecha es la de la que entró antes al servidor.
-- La bolsa sale como un inventario (una línea por moneda). En el perfil propio, un botón abre la forja.
 """
 
 import asyncio
@@ -89,12 +89,11 @@ class PerfilCog(commands.Cog):
         return cog if cog is not None and guild_id in cog.channels else None
 
     async def perfil_card(self, member: discord.Member, own: bool = False) -> tarjetas.Card:
-        """La tarjeta del perfil. Con `own` (es el de quien lo pide), lleva el botón de su forja."""
+        """La tarjeta del perfil. Con `own` (es el de quien lo pide), lleva los botones de su inventario y su forja."""
         guild = member.guild
         group = cuentas.group_of(guild.id, member.id)
-        purse = await asyncio.to_thread(monedas.person_purse, guild.id, group)
 
-        # Tres bloques separados: quién es (junto al avatar), su progreso y su bolsa. Un icono por dato,
+        # Bloques separados: quién es (junto al avatar) y su progreso; en el propio, sus botones. Un icono por dato,
         # que diga qué es; lo importante en negrita o en grande y lo secundario en pequeño (-#)
         card = tarjetas.Card(member.colour if member.colour.value else tarjetas.LEVELS)
         identity = [f"## 🛡️ {escape_markdown(member.display_name)}"]
@@ -122,17 +121,14 @@ class PerfilCog(commands.Cog):
                       f"-# ✨ {monedas.fmt_number(xp)} de experiencia en total{tarjetas.FIELD_SEP}"
                       f"🎁 Nivel {level + 1}: +{reward}")
 
-        card.separator()
-        # La bolsa como un inventario: una línea por moneda, también las que estén a 0
-        lines = [monedas.coin(name, purse.get(name)) for name in monedas.COIN_NAMES]
-        card.text(f"{tarjetas.emoji('bolsa')} **Bolsa**\n" + "\n".join(lines))
-        if own:
-            card.buttons(forja.OpenForgeButton())
+        if own:  # Las monedas, aparte: el inventario y la forja se abren en privado
+            card.separator()
+            card.buttons(forja.OpenInventoryButton(), forja.OpenForgeButton())
         if len(group) > 1:
             card.note("🔗 Cuentas vinculadas: " + " · ".join(f"<@{user_id}>" for user_id in group))
         return card
 
-    @app_commands.command(name="perfil", description="Perfil de personaje: título, nivel, puesto, monedas y antigüedad")
+    @app_commands.command(name="perfil", description="Perfil de personaje: título, nivel, puesto y antigüedad (en el tuyo, inventario y forja)")
     @app_commands.guild_only()
     @app_commands.describe(usuario="De quién ver el perfil (por defecto, el tuyo)")
     async def perfil(self, interaction: discord.Interaction, usuario: Optional[discord.Member] = None):
