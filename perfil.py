@@ -107,9 +107,10 @@ class PerfilCog(commands.Cog):
         if levels is not None:
             xp = await asyncio.to_thread(niveles.person_xp, guild.id, group)
             index = levels.position_of(levels.ranked_people(guild), guild.id, member.id)
-            position = f" · Puesto **#{index + 1}**" if index is not None else ""
+            position = f" · Puesto #{index + 1}" if index is not None else ""
             card.separator()
-            card.text(f"**Nivel {niveles.level_for_xp(xp)}**{position}\n{niveles.level_progress(xp)}\n"
+            # El nivel como subtítulo: es lo que más se mira, que se vea grande
+            card.text(f"### Nivel {niveles.level_for_xp(xp)}{position}\n{niveles.level_progress(xp)}\n"
                       f"-# {monedas.fmt_number(xp)} de experiencia en total")
 
         card.separator()

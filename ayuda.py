@@ -10,7 +10,6 @@ import discord
 from discord import ui
 
 import tarjetas
-from monedas import EMOJIS
 from tarjetas import cmd
 
 
@@ -52,8 +51,8 @@ def _gremio() -> str:
         f"{cmd('vincular')} — Une otra cuenta tuya: vuestra experiencia se suma\n"
         f"{cmd('desvincular')} — Separa una cuenta vinculada\n"
         "-# Se gana experiencia escribiendo y estando en voz. Llegar al nivel N da N de plata.\n"
-        f"-# {EMOJIS['cobre']} 100 de cobre = {EMOJIS['plata']} 1 de plata · "
-        f"{EMOJIS['plata']} 100 de plata = {EMOJIS['oro']} 1 de oro."
+        f"-# {tarjetas.emoji('cobre')} 100 de cobre = {tarjetas.emoji('plata')} 1 de plata · "
+        f"{tarjetas.emoji('plata')} 100 de plata = {tarjetas.emoji('oro')} 1 de oro."
     )
 
 

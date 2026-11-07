@@ -9,55 +9,20 @@ Monedas: cobre, plata y oro, al estilo de un RPG.
 - Todo va por persona: las cuentas vinculadas (cuentas.py) suman sus monedas.
 """
 
-import logging
-from typing import Dict, Iterable, List, Tuple
-
-import discord
+from typing import Iterable, List, Tuple
 
 import db
-
-logger = logging.getLogger(__name__)
+import tarjetas
 
 PLATA = 100          # Cobre que vale una de plata
 ORO = 100 * PLATA    # Cobre que vale una de oro
 LEVEL_REWARD = PLATA  # Llegar al nivel N da N veces esto (N de plata)
 COINS = (("oro", ORO), ("plata", PLATA), ("cobre", 1))
 
-# Emoji de cada moneda. Al arrancar, find_emojis() pone los emojis propios del bot si los encuentra
-# por su nombre; si no, se quedan estos.
-EMOJIS: Dict[str, str] = {"oro": "🟡", "plata": "⚪", "cobre": "🟤"}
-EMOJI_NAMES = {"oro": ("gold", "oro"), "plata": ("silver", "plata"), "cobre": ("copper", "cobre")}
-
-
-async def find_emojis(client: discord.Client):
-    """
-    Busca los emojis de las monedas por su nombre (gold/oro, silver/plata, copper/cobre): primero entre
-    los de la aplicación (Developer Portal → el bot → Emojis), que el bot puede usar en cualquier sitio;
-    si no, entre los de los servidores donde está. No hace falta copiar IDs.
-    """
-    try:
-        candidates = list(await client.fetch_application_emojis())
-    except discord.HTTPException as e:
-        logger.warning(f"💰 No pude leer los emojis de la aplicación: {e}")
-        candidates = []
-    candidates += [emoji for emoji in client.emojis if emoji.is_usable()]
-    by_name = {}
-    for emoji in candidates:
-        by_name.setdefault(emoji.name.lower(), emoji)  # Los de la aplicación van primero y tienen preferencia
-    found, missing = [], []
-    for coin, names in EMOJI_NAMES.items():
-        emoji = next((by_name[name] for name in names if name in by_name), None)
-        if emoji is None:
-            missing.append(names[0])
-            continue
-        EMOJIS[coin] = str(emoji)
-        where = "servidor " + emoji.guild.name if emoji.guild else "aplicación"
-        found.append(f"{coin}=:{emoji.name}: ({where})")
-    if found:
-        logger.info("💰 Emojis de las monedas: " + ", ".join(found))
-    if missing:
-        logger.warning(f"💰 No encuentro los emojis {', '.join(missing)}: súbelos con ese nombre en el Developer "
-                       f"Portal → la aplicación de ESTE bot → Emojis. Mientras, salen puntos de colores.")
+# Emojis propios de las monedas (se buscan por nombre al conectarse; si faltan, puntos de colores)
+tarjetas.register_emoji("oro", ("gold", "oro"), "🟡")
+tarjetas.register_emoji("plata", ("silver", "plata"), "⚪")
+tarjetas.register_emoji("cobre", ("copper", "cobre"), "🟤")
 
 
 def fmt_number(number: int) -> str:
@@ -79,8 +44,7 @@ def format_money(cobre: int) -> str:
 
 
 def _coin(name: str, amount: int) -> str:
-    own_emoji = EMOJIS[name].startswith("<")
-    return f"{EMOJIS[name]} **{fmt_number(amount)}**" + ("" if own_emoji else f" {name}")
+    return f"{tarjetas.emoji(name)} **{fmt_number(amount)}**" + ("" if tarjetas.has_emoji(name) else f" {name}")
 
 
 def level_rewards(from_level: int, to_level: int) -> int:

@@ -336,14 +336,21 @@ def plan_import(guild_id: int, members: List[discord.Member], entries: List[Tupl
 # COMANDOS Y CONTADORES
 # ==========================================
 
-def progress_bar(fraction: float, length: int = 12) -> str:
-    """▰▰▰▱▱▱: se ve igual en el PC y en el móvil (los ░ salen punteados)."""
+# Segmentos de la barra de progreso: emojis propios azules (datos/emojis/); si faltan, ▰▱
+tarjetas.register_emoji("barra_llena", ("barra_llena",), "▰")
+tarjetas.register_emoji("barra_vacia", ("barra_vacia",), "▱")
+
+
+def progress_bar(fraction: float, length: int = 10) -> str:
+    """Barra por tramos: con los emojis propios, azul; si falta alguno, ▰▰▰▱▱▱ (los dos de respaldo, sin mezclar)."""
     filled = max(0, min(length, round(fraction * length)))
-    return "▰" * filled + "▱" * (length - filled)
+    own = tarjetas.has_emoji("barra_llena") and tarjetas.has_emoji("barra_vacia")
+    full, empty = (tarjetas.emoji("barra_llena"), tarjetas.emoji("barra_vacia")) if own else ("▰", "▱")
+    return full * filled + empty * (length - filled)
 
 
 def level_progress(xp: int) -> str:
-    """Barra hasta el nivel siguiente: ▰▰▰▱▱▱  120 / 300 exp."""
+    """Barra hasta el nivel siguiente: ▰▰▰▱▱▱  120 / 300 exp (o con los emojis azules)."""
     level = level_for_xp(xp)
     current, following = total_xp_for_level(level), total_xp_for_level(level + 1)
     return f"{progress_bar((xp - current) / (following - current))}  {_fmt(xp - current)} / {_fmt(following - current)} exp"

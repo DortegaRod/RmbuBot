@@ -12,7 +12,7 @@ Un mensaje con tarjeta no puede llevar texto normal ni embeds, ni volver a tener
 """
 
 import logging
-from typing import Awaitable, Callable, Dict, List, Optional, Union
+from typing import Awaitable, Callable, Dict, List, Optional, Tuple, Union
 
 import discord
 from discord import ui
@@ -46,6 +46,61 @@ def cmd(name: str) -> str:
     """
     command_id = command_ids.get(name.split()[0])
     return f"</{name}:{command_id}>" if command_id else f"`/{name}`"
+
+
+# ==========================================
+# EMOJIS PROPIOS
+# ==========================================
+
+# Emojis subidos al bot (Developer Portal → la aplicación → Emojis; las imágenes están en datos/emojis/).
+# Se buscan por su nombre al conectarse (find_emojis), así que no hay que copiar IDs; si alguno no está,
+# se usa su emoji de respaldo. Cada módulo registra los suyos: clave -> (nombres posibles, respaldo).
+_EMOJI_SPECS: Dict[str, Tuple[Tuple[str, ...], str]] = {}
+_found_emojis: Dict[str, str] = {}
+
+
+def register_emoji(key: str, names: Tuple[str, ...], fallback: str):
+    _EMOJI_SPECS[key] = (names, fallback)
+
+
+def emoji(key: str) -> str:
+    """El emoji propio de `key` si el bot lo tiene; si no, el de respaldo."""
+    return _found_emojis.get(key) or _EMOJI_SPECS[key][1]
+
+
+def has_emoji(key: str) -> bool:
+    """True si se encontró el emoji propio de `key` (y no se usa el de respaldo)."""
+    return key in _found_emojis
+
+
+async def find_emojis(client: discord.Client):
+    """
+    Busca por su nombre los emojis registrados: primero entre los de la aplicación, que el bot puede usar
+    en cualquier sitio; si no, entre los de los servidores donde está. Lo que encuentra lo dice en el log.
+    """
+    try:
+        candidates = list(await client.fetch_application_emojis())
+    except discord.HTTPException as e:
+        logger.warning(f"🙂 No pude leer los emojis de la aplicación: {e}")
+        candidates = []
+    candidates += [found for found in client.emojis if found.is_usable()]
+    by_name: Dict[str, discord.Emoji] = {}
+    for found in candidates:
+        by_name.setdefault(found.name.lower(), found)  # Los de la aplicación van primero y tienen preferencia
+    found_names, missing = [], []
+    for key, (names, _) in _EMOJI_SPECS.items():
+        match = next((by_name[name] for name in names if name in by_name), None)
+        if match is None:
+            missing.append(names[0])
+            continue
+        _found_emojis[key] = str(match)
+        found_names.append(f":{match.name}:" + (f" (servidor {match.guild.name})" if match.guild else ""))
+    if found_names:
+        logger.info("🙂 Emojis propios: " + ", ".join(found_names))
+    if missing:
+        logger.warning(f"🙂 No encuentro los emojis {', '.join(missing)}: súbelos con ese nombre en el Developer "
+                       f"Portal → la aplicación de ESTE bot → Emojis (las imágenes están en datos/emojis/). "
+                       f"Mientras, se usan emojis normales.")
 
 
 class Card(ui.LayoutView):
