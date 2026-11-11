@@ -17,7 +17,7 @@ from discord.utils import escape_markdown
 import db
 import tarjetas
 from tarjetas import NO_MENTIONS
-from config import MAX_QUEUE_SIZE
+from config import DEFAULT_VOLUME, MAX_QUEUE_SIZE
 from music import (music_manager, disconnect_player, play_next, MusicPlayer, Song, LOOP_LABELS,
                    LOOP_OFF, LOOP_CURRENT)
 
@@ -167,6 +167,8 @@ async def connect_voice(interaction: discord.Interaction) -> Optional[discord.Vo
         # Lógica de conexión y movimiento de canal
         if vc is None:
             vc = await channel.connect(self_deaf=True, timeout=20)
+            # Cada vez que entra a un canal empieza con el volumen por defecto (el de /volume no se guarda)
+            music_manager.get_player(interaction.guild).volume = DEFAULT_VOLUME
         elif vc.channel != channel:
             await vc.move_to(channel)
     except asyncio.TimeoutError:
