@@ -1,14 +1,14 @@
 """
-Top de clips: en los canales que elige un admin con /clips, el bot mantiene como último mensaje un top 10
-de los clips más votados de siempre.
+Top de clips: en los canales que elige un admin con /clips, el bot mantiene como último mensaje un top de
+los clips más votados de siempre.
 
 - Vale un canal de texto o un foro. En un foro, cada publicación tiene su propio top, con sus clips, como
   último mensaje de esa publicación (las publicaciones nuevas lo tienen solas). Aquí, al canal de texto o a
   la publicación donde va un top se le llama «sitio».
 - Un clip es un mensaje con un enlace o un vídeo adjunto (de una persona, no de un bot).
 - Si se edita un clip, el top se actualiza con su título nuevo.
-- Cada puesto del top lleva un botón ▶️ Ver que lleva al clip. Si hay más clips, «📜 Todos los clips» abre la
-  lista entera (10 por página, también los que no tienen votos), solo para quien la pide.
+- El top tiene todos los clips (también los que no tienen votos), 10 por página. Cada puesto lleva un botón
+  ▶️ Ver que lleva al clip. Las flechas abren las otras páginas solo para quien las pulsa.
 - Se vota reaccionando con el emoji del canal (por defecto ✅; se puede elegir otro, también del servidor).
   Cuenta cada reacción con ese emoji, también la del autor; las de los bots, no.
 - Cuando alguien escribe en un sitio, el bot borra su top y lo vuelve a publicar abajo (espera unos segundos
@@ -38,8 +38,7 @@ from tarjetas import NO_MENTIONS
 
 logger = logging.getLogger(__name__)
 
-TOP_SIZE = 10            # Clips en el top
-PAGE_SIZE = 10           # Clips por página en la lista entera (📜 Todos los clips)
+PAGE_SIZE = 10           # Clips por página del top
 DEFAULT_EMOJI = "✅"     # Reacción que vota, si el admin no elige otra
 REPOST_DELAY = 3.0       # Segundos sin mensajes nuevos antes de volver a publicar el top abajo
 REFRESH_DELAY = 2.0      # Segundos que se agrupan los cambios de votos antes de editar el top
@@ -254,15 +253,6 @@ def is_clip(message_id: int) -> bool:
         return conn.execute("SELECT 1 FROM clips WHERE message_id = ?", (message_id,)).fetchone() is not None
 
 
-def top_clips(place_id: int, limit: int = TOP_SIZE) -> List[Clip]:
-    """Los más votados (con al menos un voto); a igualdad, el que se publicó antes."""
-    with db.get_db_connection() as conn:
-        rows = conn.execute("SELECT message_id, author_id, votes, created_at, label FROM clips "
-                            "WHERE channel_id = ? AND votes > 0 ORDER BY votes DESC, created_at ASC LIMIT ?",
-                            (place_id, limit)).fetchall()
-    return [Clip(*row) for row in rows]
-
-
 def count_clips(place_id: int) -> int:
     with db.get_db_connection() as conn:
         return conn.execute("SELECT COUNT(*) FROM clips WHERE channel_id = ?", (place_id,)).fetchone()[0]
@@ -306,26 +296,14 @@ def _clip_rows(card: tarjetas.Card, guild_id: int, place_id: int, emoji: str, cl
         card.box.add_item(ui.Section(ui.TextDisplay(text), accessory=button))
 
 
-def top_card(guild_id: int, place_id: int, emoji: str, clips: List[Clip], total: int = 0) -> tarjetas.Card:
-    """El top que va abajo del todo. Si hay más clips de los que salen, un botón abre la lista entera."""
+def top_card(guild_id: int, place_id: int, emoji: str, clips: List[Clip], page: int = 1,
+             pages: int = 1) -> tarjetas.Card:
+    """Una página del top (la 1 es la que va abajo del todo). Si hay más de una, flechas para pasar de página."""
     card = tarjetas.Card(COLOUR)
-    card.text(f"## 🎬 Top {TOP_SIZE} clips")
-    _clip_rows(card, guild_id, place_id, emoji, clips, 1)
-    if not clips:
-        card.text("Aún no hay clips con votos.")
-    card.separator()
-    card.note(f"Vota un clip reaccionando con {emoji}. Cuenta cualquier mensaje con un enlace o un vídeo.")
-    if total > len(clips):
-        card.buttons(ClipsPageButton(place_id, 1, label=f"Todos los clips ({total})", emoji="📜"))
-    return card
-
-
-def list_card(guild_id: int, place_id: int, emoji: str, title: str, page: int, pages: int,
-              clips: List[Clip], total: int) -> tarjetas.Card:
-    """Una página de la lista entera (la que se abre con 📜, solo para quien la pide)."""
-    card = tarjetas.Card(COLOUR)
-    card.text(f"## 📜 Clips de {escape_markdown(title)}\n-# {total} clips, de más a menos votados")
+    card.text("## 🎬 Top clips")
     _clip_rows(card, guild_id, place_id, emoji, clips, (page - 1) * PAGE_SIZE + 1)
+    if not clips:
+        card.text("Aún no hay clips.")
     if pages > 1:
         card.buttons(ClipsPageButton(place_id, page - 1, emoji="◀️", disabled=page <= 1),
                      ClipsPageButton(place_id, page, label=f"{page} / {pages}", disabled=True, tag="n"),
@@ -335,8 +313,8 @@ def list_card(guild_id: int, place_id: int, emoji: str, title: str, page: int, p
 
 class ClipsPageButton(ui.DynamicItem[ui.Button], template=r"reimbou:clips:(?P<place>\d+):(?P<page>\d+)(?::n)?"):
     """
-    📜 Todos los clips (en el top) y las flechas de la lista. Desde el top, abre la lista solo para quien pulsa;
-    dentro de la lista (que ya solo ve esa persona), cambia de página en el mismo mensaje.
+    Las flechas del top. Desde el top público, abren la página solo para quien pulsa; dentro de esa página (que
+    ya solo ve esa persona), cambian de página en el mismo mensaje.
     """
 
     def __init__(self, place_id: int, page: int, *, label: Optional[str] = None, emoji=None,
@@ -354,7 +332,7 @@ class ClipsPageButton(ui.DynamicItem[ui.Button], template=r"reimbou:clips:(?P<pl
 
     async def _open(self, interaction: discord.Interaction):
         cog = interaction.client.get_cog("ClipsCog")
-        card = await cog.list_page(self.place_id, self.page) if cog else None
+        card = await cog.card(self.place_id, self.page) if cog else None
         if card is None:
             return await interaction.response.send_message("⌛ Este top ya no está activo.", ephemeral=True)
         if interaction.message is not None and interaction.message.flags.ephemeral:
@@ -499,17 +477,8 @@ class ClipsCog(commands.Cog):
     def _lock(self, place_id: int) -> asyncio.Lock:
         return self.locks.setdefault(place_id, asyncio.Lock())
 
-    async def _card(self, place_id: int) -> Optional[tarjetas.Card]:
-        spot = self.spots.get(place_id)
-        config = self.channels.get(spot.parent_id) if spot else None
-        if config is None:
-            return None
-        clips = await asyncio.to_thread(top_clips, place_id)
-        total = await asyncio.to_thread(count_clips, place_id)
-        return top_card(config.guild_id, place_id, config.emoji, clips, total)
-
-    async def list_page(self, place_id: int, page: int) -> Optional[tarjetas.Card]:
-        """Una página de la lista entera de clips de un sitio; None si ese sitio ya no tiene top."""
+    async def card(self, place_id: int, page: int = 1) -> Optional[tarjetas.Card]:
+        """Una página del top de un sitio (la 1 es la que va abajo); None si ese sitio ya no tiene top."""
         spot = self.spots.get(place_id)
         config = self.channels.get(spot.parent_id) if spot else None
         if config is None:
@@ -518,9 +487,7 @@ class ClipsCog(commands.Cog):
         pages = max(1, -(-total // PAGE_SIZE))
         page = min(max(1, page), pages)
         clips = await asyncio.to_thread(clips_page, place_id, page)
-        place = self._place(place_id)
-        title = place.name if place is not None else "este canal"
-        return list_card(config.guild_id, place_id, config.emoji, title, page, pages, clips, total)
+        return top_card(config.guild_id, place_id, config.emoji, clips, page, pages)
 
     def _schedule(self, tasks: Dict[int, asyncio.Task], place_id: int, delay: float, action):
         """Hace `action` dentro de `delay` segundos; si ya había una pendiente, empieza a contar de nuevo."""
@@ -546,7 +513,7 @@ class ClipsCog(commands.Cog):
     async def repost(self, place_id: int, again: bool = False):
         """Publica el top abajo del todo y borra el anterior (con `again`, aunque ya sea el último mensaje)."""
         async with self._lock(place_id):
-            place, spot, card = self._place(place_id), self.spots.get(place_id), await self._card(place_id)
+            place, spot, card = self._place(place_id), self.spots.get(place_id), await self.card(place_id)
             if place is None or spot is None or card is None:
                 return
             if not again and place.last_message_id is not None and place.last_message_id == spot.top_message_id:
@@ -564,7 +531,7 @@ class ClipsCog(commands.Cog):
     async def refresh(self, place_id: int):
         """Actualiza el top donde está; si ya no existe, lo publica de nuevo."""
         async with self._lock(place_id):
-            place, spot, card = self._place(place_id), self.spots.get(place_id), await self._card(place_id)
+            place, spot, card = self._place(place_id), self.spots.get(place_id), await self.card(place_id)
             if place is None or spot is None or card is None:
                 return
             archived = isinstance(place, discord.Thread) and place.archived
@@ -715,11 +682,11 @@ class ClipsCog(commands.Cog):
                  for channel_id, config in self.channels.items() if config.guild_id == guild.id]
         card = tarjetas.Card(tarjetas.INFO)
         card.text("### 🎬 Canales de clips\n" + ("\n".join(lines) or "Ningún canal todavía."))
-        card.note(f"El último mensaje es siempre el top {TOP_SIZE} de clips más votados (en un foro, el de cada "
+        card.note(f"El último mensaje es siempre el top de clips más votados (en un foro, el de cada "
                   f"publicación). Añade uno con {tarjetas.cmd('clips')}.")
         return card
 
-    @app_commands.command(name="clips", description="Canales con el top 10 de clips más votados (solo admins)")
+    @app_commands.command(name="clips", description="Canales con el top de clips más votados (solo admins)")
     @app_commands.guild_only()
     @app_commands.default_permissions(manage_guild=True)
     @app_commands.checks.has_permissions(manage_guild=True)
@@ -764,8 +731,8 @@ class ClipsCog(commands.Cog):
         config = ClipChannel(guild.id, str(parsed), forum)
         self.channels[canal.id] = config
         await asyncio.to_thread(save_channel, canal.id, config)
-        where = (f"cada publicación de {canal.mention} tendrá su propio top {TOP_SIZE} como último mensaje "
-                 f"(también las nuevas)" if forum else f"el top {TOP_SIZE} será siempre el último mensaje")
+        where = (f"cada publicación de {canal.mention} tendrá su propio top como último mensaje "
+                 f"(también las nuevas)" if forum else "el top será siempre el último mensaje")
         await interaction.response.send_message(
             f"✅ {canal.mention} tiene ahora top de clips: se vota reaccionando con {config.emoji} a cualquier "
             f"mensaje con un enlace o un vídeo, y {where}. Estoy contando los clips que ya hay.",

@@ -71,7 +71,7 @@ def _admin() -> str:
         f"{cmd('evento-voz')} — Evento de Discord automático cuando alguien con un rol entra en un canal de voz\n"
         f"{cmd('setup-eventos')} — Canal donde se avisa con el enlace cuando empieza un evento\n"
         f"{cmd('titulos')} — Qué roles salen como título en el perfil\n"
-        f"{cmd('clips')} — Canales con el top 10 de clips más votados, siempre como último mensaje\n"
+        f"{cmd('clips')} — Canales con el top de clips más votados, siempre como último mensaje\n"
         "-# Necesitan el permiso «Gestionar servidor»."
     )
 
