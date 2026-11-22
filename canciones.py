@@ -76,6 +76,9 @@ def init_db():
         conn.execute("CREATE INDEX IF NOT EXISTS canciones_por_servidor ON canciones_sonadas (guild_id, url)")
         # Servidores cuyo canal ya se leyó (las tarjetas «Sonó» de antes de existir el top)
         conn.execute("CREATE TABLE IF NOT EXISTS canciones_importadas (guild_id INTEGER PRIMARY KEY)")
+        # Solo cuenta como leído si se encontró algo (la primera versión lo marcaba aunque no encontrara nada)
+        conn.execute("DELETE FROM canciones_importadas WHERE guild_id NOT IN "
+                     "(SELECT DISTINCT guild_id FROM canciones_sonadas)")
 
 
 def save_plays(guild_id: int, plays: Iterable[Play]) -> int:
