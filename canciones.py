@@ -32,6 +32,7 @@ logger = logging.getLogger(__name__)
 
 PAGE_SIZE = 10          # Canciones por página
 TITLE_LENGTH = 100      # Largo máximo del título en el top
+IMPORT_BATCH = 500      # Al leer el historial, se guarda lo encontrado cada tantos mensajes
 COLOUR = tarjetas.MUSIC
 MEDALS = {1: "🥇", 2: "🥈", 3: "🥉"}
 YOUTUBE_HOSTS = ("youtube.com", "www.youtube.com", "m.youtube.com", "music.youtube.com")
@@ -189,7 +190,7 @@ async def record_play(player, song):
 # ==========================================
 
 def top_card(owner_id: int, who_id: int, who_name: Optional[str], songs: List[TopSong], page: int, pages: int,
-             total_songs: int, total_plays: int) -> tarjetas.Card:
+             total_songs: int, total_plays: int, reading: bool = False) -> tarjetas.Card:
     card = tarjetas.Card(COLOUR)
     card.text(f"## 🎶 Lo más pedido por {escape_markdown(who_name)}" if who_name else "## 🎶 Top canciones")
     for position, song in enumerate(songs, (page - 1) * PAGE_SIZE + 1):
@@ -202,6 +203,8 @@ def top_card(owner_id: int, who_id: int, who_name: Optional[str], songs: List[To
         card.text("Aún no ha sonado ninguna canción." if not who_name else "Aún no ha pedido ninguna canción.")
     else:
         card.note(f"{total_plays} reproducciones · {total_songs} canciones distintas")
+    if reading:
+        card.note("⏳ Aún estoy leyendo del canal las canciones que ya habían sonado: vuelve a mirar en un rato.")
     if pages > 1:
         card.buttons(TopSongsButton(owner_id, who_id, page - 1, emoji="◀️", disabled=page <= 1),
                      TopSongsButton(owner_id, who_id, page, label=f"{page} / {pages}", disabled=True),
@@ -209,7 +212,8 @@ def top_card(owner_id: int, who_id: int, who_name: Optional[str], songs: List[To
     return card
 
 
-async def build_top(guild: discord.Guild, owner_id: int, who_id: int, page: int) -> tarjetas.Card:
+async def build_top(guild: discord.Guild, owner_id: int, who_id: int, page: int,
+                    reading: bool = False) -> tarjetas.Card:
     """Una página del top del servidor (who_id = 0) o de lo que pidió una persona."""
     requesters = await asyncio.to_thread(cuentas.group_of, guild.id, who_id) if who_id else None
     total_songs, total_plays = await asyncio.to_thread(count_songs, guild.id, requesters)
@@ -220,7 +224,7 @@ async def build_top(guild: discord.Guild, owner_id: int, who_id: int, page: int)
     if who_id:
         member = guild.get_member(who_id)
         who_name = member.display_name if member else "alguien que ya no está"
-    return top_card(owner_id, who_id, who_name, songs, page, pages, total_songs, total_plays)
+    return top_card(owner_id, who_id, who_name, songs, page, pages, total_songs, total_plays, reading)
 
 
 class TopSongsButton(ui.DynamicItem[ui.Button],
@@ -245,7 +249,9 @@ class TopSongsButton(ui.DynamicItem[ui.Button],
         await tarjetas.run_safely(interaction, self._turn_page)
 
     async def _turn_page(self, interaction: discord.Interaction):
-        card = await build_top(interaction.guild, interaction.user.id, self.who_id, self.page)
+        cog = interaction.client.get_cog("CancionesCog")
+        reading = cog is not None and interaction.guild_id in cog.reading
+        card = await build_top(interaction.guild, interaction.user.id, self.who_id, self.page, reading)
         if interaction.user.id == self.owner_id:
             await tarjetas.update(interaction, card)
         else:
@@ -262,6 +268,7 @@ class CancionesCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self.task: Optional[asyncio.Task] = None
+        self.reading: set = set()  # Servidores cuyo canal se está leyendo ahora
 
     async def cog_load(self):
         init_db()
@@ -287,25 +294,40 @@ class CancionesCog(commands.Cog):
         channel_id = db.get_music_channel(guild.id)
         channel = guild.get_channel(channel_id) if channel_id else None
         if not isinstance(channel, (discord.TextChannel, discord.VoiceChannel)):
-            return  # Sin canal de comandos no se sabe dónde están (se vuelve a mirar al arrancar)
+            # Sin canal de comandos no se sabe dónde están (se vuelve a mirar al arrancar)
+            logger.info(f"🎶 Canciones: {guild.name} no tiene canal de comandos (/setup): no leo las de antes")
+            return
         perms = channel.permissions_for(guild.me)
         if not (perms.view_channel and perms.read_message_history):
             logger.warning(f"🎶 Canciones: no puedo leer el historial de #{channel.name}")
             return
-        plays: List[Play] = []
-        async for message in channel.history(limit=None):
-            if message.author.id == self.bot.user.id:
-                play = play_from_card(message)
-                if play is not None:
-                    plays.append(play)
-        new = await asyncio.to_thread(save_plays, guild.id, plays)
-        await asyncio.to_thread(mark_imported, guild.id)
-        logger.info(f"🎶 Canciones: leídas {len(plays)} tarjetas de #{channel.name} ({new} nuevas)")
+        logger.info(f"🎶 Canciones: leyendo las tarjetas «Sonó» de #{channel.name}...")
+        self.reading.add(guild.id)
+        try:
+            found = new = read = 0
+            plays: List[Play] = []
+            async for message in channel.history(limit=None):
+                read += 1
+                if message.author.id == self.bot.user.id:
+                    play = play_from_card(message)
+                    if play is not None:
+                        plays.append(play)
+                if len(plays) >= IMPORT_BATCH or (plays and read % IMPORT_BATCH == 0):
+                    found, new = found + len(plays), new + await asyncio.to_thread(save_plays, guild.id, plays)
+                    plays = []  # Se guarda por tandas: el top se va llenando mientras se lee
+            found, new = found + len(plays), new + await asyncio.to_thread(save_plays, guild.id, plays)
+        finally:
+            self.reading.discard(guild.id)
+        if found:
+            await asyncio.to_thread(mark_imported, guild.id)
+        logger.info(f"🎶 Canciones: leídos {read} mensajes de #{channel.name}: {found} tarjetas «Sonó» ({new} nuevas)"
+                    + ("" if found else "; ninguna, así que se vuelve a mirar al arrancar"))
 
     @app_commands.command(name="top-canciones", description="Las canciones que más han sonado con el bot")
     @app_commands.guild_only()
     @app_commands.describe(usuario="Solo las que ha pedido esta persona", pagina="Página del top (10 por página)")
     async def top_canciones(self, interaction: discord.Interaction, usuario: Optional[discord.Member] = None,
                             pagina: app_commands.Range[int, 1, 1000] = 1):
-        card = await build_top(interaction.guild, interaction.user.id, usuario.id if usuario else 0, pagina)
+        card = await build_top(interaction.guild, interaction.user.id, usuario.id if usuario else 0, pagina,
+                               interaction.guild_id in self.reading)
         await interaction.response.send_message(view=card, allowed_mentions=NO_MENTIONS)
