@@ -6,16 +6,17 @@ página; con usuario:@alguien, las que más ha pedido esa persona (con sus cuent
   bucle no cuentan (ni el reintento cuando una canción se corta nada más empezar). Las radios no entran.
 - Las canciones se agrupan por su enlace (los de YouTube, por el vídeo, aunque el enlace se escriba distinto);
   se enseña el título con el que sonó la última vez.
-- Lo de antes de existir este top se lee una vez del canal de comandos (/setup): cada canción que sonó dejó
-  ahí su tarjeta «🎶 Sonó» (desde el 22/10/2026; antes, la tarjeta se borraba). Cada reproducción guarda el
-  mensaje de su tarjeta, para no contarla dos veces.
+- Lo de antes de existir este top se lee del canal de canciones que elige un admin con /setup-canciones (no
+  es el de /setup, que es para todo el bot): cada canción que sonó dejó ahí su tarjeta «🎶 Sonó» (desde el
+  22/10/2026; antes, la tarjeta se borraba). Se lee al elegirlo; cada reproducción guarda el mensaje de su
+  tarjeta, para no contarla dos veces aunque se vuelva a leer.
 """
 
 import asyncio
 import logging
 import re
 from dataclasses import dataclass
-from typing import Iterable, List, Optional, Tuple
+from typing import Iterable, List, Optional, Tuple, Union
 from urllib.parse import parse_qs, urlparse
 
 import discord
@@ -74,11 +75,10 @@ def init_db():
             played_at REAL NOT NULL
         )""")
         conn.execute("CREATE INDEX IF NOT EXISTS canciones_por_servidor ON canciones_sonadas (guild_id, url)")
-        # Servidores cuyo canal ya se leyó (las tarjetas «Sonó» de antes de existir el top)
-        conn.execute("CREATE TABLE IF NOT EXISTS canciones_importadas (guild_id INTEGER PRIMARY KEY)")
-        # Solo cuenta como leído si se encontró algo (la primera versión lo marcaba aunque no encontrara nada)
-        conn.execute("DELETE FROM canciones_importadas WHERE guild_id NOT IN "
-                     "(SELECT DISTINCT guild_id FROM canciones_sonadas)")
+        # Canal de canciones de cada servidor (/setup-canciones) y canales ya leídos enteros
+        conn.execute("CREATE TABLE IF NOT EXISTS canciones_config (guild_id INTEGER PRIMARY KEY, channel_id INTEGER)")
+        conn.execute("CREATE TABLE IF NOT EXISTS canciones_canales_leidos (channel_id INTEGER PRIMARY KEY)")
+        conn.execute("DROP TABLE IF EXISTS canciones_importadas")  # La primera versión leía el canal de /setup
 
 
 def save_plays(guild_id: int, plays: Iterable[Play]) -> int:
@@ -91,14 +91,31 @@ def save_plays(guild_id: int, plays: Iterable[Play]) -> int:
         return conn.total_changes - before
 
 
-def is_imported(guild_id: int) -> bool:
+def load_channel(guild_id: int) -> Optional[int]:
     with db.get_db_connection() as conn:
-        return conn.execute("SELECT 1 FROM canciones_importadas WHERE guild_id = ?", (guild_id,)).fetchone() is not None
+        row = conn.execute("SELECT channel_id FROM canciones_config WHERE guild_id = ?", (guild_id,)).fetchone()
+    return row[0] if row else None
 
 
-def mark_imported(guild_id: int):
+def save_channel(guild_id: int, channel_id: Optional[int]):
+    """Guarda el canal de canciones de un servidor; con None lo quita."""
     with db.get_db_connection() as conn:
-        conn.execute("INSERT OR IGNORE INTO canciones_importadas (guild_id) VALUES (?)", (guild_id,))
+        if channel_id is None:
+            conn.execute("DELETE FROM canciones_config WHERE guild_id = ?", (guild_id,))
+        else:
+            conn.execute("INSERT OR REPLACE INTO canciones_config (guild_id, channel_id) VALUES (?, ?)",
+                         (guild_id, channel_id))
+
+
+def is_read(channel_id: int) -> bool:
+    with db.get_db_connection() as conn:
+        return conn.execute("SELECT 1 FROM canciones_canales_leidos WHERE channel_id = ?",
+                            (channel_id,)).fetchone() is not None
+
+
+def mark_read(channel_id: int):
+    with db.get_db_connection() as conn:
+        conn.execute("INSERT OR IGNORE INTO canciones_canales_leidos (channel_id) VALUES (?)", (channel_id,))
 
 
 def _who(requesters: Optional[List[int]]) -> Tuple[str, tuple]:
@@ -266,23 +283,27 @@ class TopSongsButton(ui.DynamicItem[ui.Button],
 # ==========================================
 
 class CancionesCog(commands.Cog):
-    """/top-canciones y la lectura, una vez, de las canciones que ya habían sonado."""
+    """/top-canciones, /setup-canciones y la lectura del canal de canciones."""
 
     def __init__(self, bot: commands.Bot):
         self.bot = bot
-        self.task: Optional[asyncio.Task] = None
+        self.tasks: set = set()
         self.reading: set = set()  # Servidores cuyo canal se está leyendo ahora
 
     async def cog_load(self):
         init_db()
         self.bot.add_dynamic_items(TopSongsButton)
-        self.task = asyncio.create_task(self._import_all())
+        task = asyncio.create_task(self._import_all())
+        self.tasks.add(task)
+        task.add_done_callback(self.tasks.discard)
 
     async def cog_unload(self):
-        if self.task and not self.task.done():
-            self.task.cancel()
+        for task in list(self.tasks):
+            if not task.done():
+                task.cancel()
 
     async def _import_all(self):
+        """Al arrancar, termina de leer los canales de canciones que se quedaron a medias."""
         await self.bot.wait_until_ready()
         for guild in self.bot.guilds:
             try:
@@ -290,15 +311,16 @@ class CancionesCog(commands.Cog):
             except Exception:
                 logger.exception(f"🎶 Canciones: no pude leer las que ya habían sonado en {guild.name}")
 
-    async def import_history(self, guild: discord.Guild):
-        """Lee del canal de comandos las tarjetas «🎶 Sonó» de antes de existir el top (una sola vez)."""
-        if await asyncio.to_thread(is_imported, guild.id):
-            return
-        channel_id = db.get_music_channel(guild.id)
+    async def import_history(self, guild: discord.Guild, again: bool = False):
+        """
+        Lee del canal de canciones las tarjetas «🎶 Sonó» de antes de existir el top. Cada canal se lee una vez
+        (si el bot se reinicia a medias, se termina al arrancar); con again, se vuelve a leer.
+        """
+        channel_id = await asyncio.to_thread(load_channel, guild.id)
         channel = guild.get_channel(channel_id) if channel_id else None
         if not isinstance(channel, (discord.TextChannel, discord.VoiceChannel)):
-            # Sin canal de comandos no se sabe dónde están (se vuelve a mirar al arrancar)
-            logger.info(f"🎶 Canciones: {guild.name} no tiene canal de comandos (/setup): no leo las de antes")
+            return
+        if not again and await asyncio.to_thread(is_read, channel.id):
             return
         perms = channel.permissions_for(guild.me)
         if not (perms.view_channel and perms.read_message_history):
@@ -319,12 +341,57 @@ class CancionesCog(commands.Cog):
                     found, new = found + len(plays), new + await asyncio.to_thread(save_plays, guild.id, plays)
                     plays = []  # Se guarda por tandas: el top se va llenando mientras se lee
             found, new = found + len(plays), new + await asyncio.to_thread(save_plays, guild.id, plays)
+            await asyncio.to_thread(mark_read, channel.id)
         finally:
             self.reading.discard(guild.id)
-        if found:
-            await asyncio.to_thread(mark_imported, guild.id)
-        logger.info(f"🎶 Canciones: leídos {read} mensajes de #{channel.name}: {found} tarjetas «Sonó» ({new} nuevas)"
-                    + ("" if found else "; ninguna, así que se vuelve a mirar al arrancar"))
+        logger.info(f"🎶 Canciones: leídos {read} mensajes de #{channel.name}: {found} tarjetas «Sonó» ({new} nuevas)")
+
+    def _spawn_import(self, guild: discord.Guild, again: bool = False):
+        task = asyncio.create_task(self.import_history(guild, again))
+        self.tasks.add(task)
+
+        def done(finished: asyncio.Task):
+            self.tasks.discard(finished)
+            if not finished.cancelled() and finished.exception() is not None:
+                logger.error(f"🎶 Canciones: no pude leer el canal de {guild.name}", exc_info=finished.exception())
+        task.add_done_callback(done)
+
+    @app_commands.command(name="setup-canciones",
+                          description="Canal de canciones: de ahí se leen las que ya habían sonado (solo admins)")
+    @app_commands.guild_only()
+    @app_commands.default_permissions(manage_guild=True)
+    @app_commands.checks.has_permissions(manage_guild=True)
+    @app_commands.describe(canal="Canal donde se piden las canciones (vacío = ver cuál es)",
+                           quitar="Quitar el canal de canciones (lo ya contado se queda)")
+    async def setup_canciones(self, interaction: discord.Interaction,
+                              canal: Optional[Union[discord.TextChannel, discord.VoiceChannel]] = None,
+                              quitar: bool = False):
+        guild = interaction.guild
+        if quitar:
+            await asyncio.to_thread(save_channel, guild.id, None)
+            return await interaction.response.send_message(
+                "✅ Ya no hay canal de canciones. Lo ya contado se queda, y se siguen contando las que suenen.",
+                ephemeral=True
+            )
+        if canal is None:
+            channel_id = await asyncio.to_thread(load_channel, guild.id)
+            text = (f"🎶 El canal de canciones es <#{channel_id}>." if channel_id
+                    else f"🎶 Aún no hay canal de canciones. Elígelo con {tarjetas.cmd('setup-canciones')}.")
+            return await interaction.response.send_message(
+                text + "\n-# Al elegirlo, leo de ahí las canciones que ya habían sonado para el "
+                       f"{tarjetas.cmd('top-canciones')}. Las nuevas cuentan suenen donde suenen.", ephemeral=True
+            )
+        perms = canal.permissions_for(guild.me)
+        if not (perms.view_channel and perms.read_message_history):
+            return await interaction.response.send_message(
+                f"❌ En {canal.mention} necesito **Ver canal** y **Leer el historial**.", ephemeral=True
+            )
+        await asyncio.to_thread(save_channel, guild.id, canal.id)
+        await interaction.response.send_message(
+            f"✅ {canal.mention} es ahora el canal de canciones. Estoy leyendo las que ya habían sonado ahí: "
+            f"en un rato salen en {tarjetas.cmd('top-canciones')}.", ephemeral=True
+        )
+        self._spawn_import(guild, again=True)
 
     @app_commands.command(name="top-canciones", description="Las canciones que más han sonado con el bot")
     @app_commands.guild_only()

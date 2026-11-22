@@ -73,6 +73,7 @@ def _admin() -> str:
         f"{cmd('setup-eventos')} — Canal donde se avisa con el enlace cuando empieza un evento\n"
         f"{cmd('titulos')} — Qué roles salen como título en el perfil\n"
         f"{cmd('clips')} — Canales con el top de clips más votados, siempre como último mensaje\n"
+        f"{cmd('setup-canciones')} — Canal de canciones, del que se leen las que ya habían sonado\n"
         "-# Necesitan el permiso «Gestionar servidor»."
     )
 
