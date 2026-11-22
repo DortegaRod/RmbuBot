@@ -45,6 +45,9 @@ COLOUR = discord.Colour.purple()
 MEDALS = {1: "🥇", 2: "🥈", 3: "🥉"}
 VIDEO_EXTENSIONS = (".mp4", ".mov", ".webm", ".mkv", ".avi", ".m4v", ".gif")
 URL_RE = re.compile(r"https?://\S+", re.IGNORECASE)
+LINE_MARK_RE = re.compile(r"^\s*(?:#{1,3}|-#|>{1,3}|[-*+]|\d+\.)\s+", re.MULTILINE)  # Títulos, citas, listas
+CUSTOM_EMOJI_RE = re.compile(r"<a?:(\w+):\d+>")
+TIMESTAMP_RE = re.compile(r"<t:(-?\d+)(?::[tTdDfFR])?>")
 
 Place = Union[discord.TextChannel, discord.Thread]  # Donde va un top: un canal de texto o una publicación
 
@@ -58,6 +61,20 @@ def _is_video(attachment: discord.Attachment) -> bool:
     return content_type.startswith("video/") or attachment.filename.lower().endswith(VIDEO_EXTENSIONS)
 
 
+def plain_text(message: discord.Message) -> str:
+    """
+    El texto del mensaje sin formato, para usarlo como texto de un enlace: las menciones pasan a @nombre
+    (Discord no deja menciones dentro de un enlace y lo rompe), sin títulos, citas ni listas, y sin enlaces.
+    """
+    text = getattr(message, "clean_content", None) or message.content or ""
+    text = URL_RE.sub(" ", text)
+    text = LINE_MARK_RE.sub("", text)
+    text = CUSTOM_EMOJI_RE.sub(r":\1:", text)
+    text = TIMESTAMP_RE.sub("", text)
+    text = re.sub(r"[*~`|]+|__", "", text)  # Negrita, cursiva, tachado, código y spoilers (los _ sueltos son de nombres)
+    return " ".join(text.split())
+
+
 def clip_label(message: discord.Message) -> Optional[str]:
     """
     Descripción corta del clip: su texto; si no tiene, el título de la vista previa del enlace (p. ej. el del
@@ -69,7 +86,7 @@ def clip_label(message: discord.Message) -> Optional[str]:
     videos = [attachment for attachment in message.attachments if _is_video(attachment)]
     if not links and not videos:
         return None
-    text = " ".join(URL_RE.sub(" ", message.content or "").split())
+    text = plain_text(message)
     if not text:
         titles = [embed.title for embed in getattr(message, "embeds", []) if getattr(embed, "title", None)]
         if titles:
@@ -345,8 +362,11 @@ class ClipsCog(commands.Cog):
 
     # ---------- Repasar ----------
 
-    async def sync_channel(self, channel_id: int):
-        """Repasa un canal elegido: él mismo o, si es un foro, cada publicación abierta."""
+    async def sync_channel(self, channel_id: int, everything: bool = False):
+        """
+        Repasa un canal elegido: él mismo o, si es un foro, cada publicación. Al arrancar se saltan las
+        archivadas que ya tienen su top abajo (no han cambiado); con `everything` (/clips) se repasan todas.
+        """
         config, guild = self.channels.get(channel_id), self._guild(channel_id)
         channel = guild.get_channel(channel_id) if guild else None
         if config is None or channel is None:
@@ -362,7 +382,8 @@ class ClipsCog(commands.Cog):
                 if thread.archived:
                     self.threads[thread.id] = thread  # Para poder publicar, editar o borrar su top
                 spot = self.spots.get(thread.id)
-                if thread.archived and spot and spot.top_message_id and thread.last_message_id == spot.top_message_id:
+                if (not everything and thread.archived and spot and spot.top_message_id
+                        and thread.last_message_id == spot.top_message_id):
                     continue  # Archivada y con su top abajo: no ha cambiado nada
                 if self._parent_of(thread.id, guild.id, channel.id) is not None:
                     await self.sync_place(thread.id)
@@ -431,13 +452,13 @@ class ClipsCog(commands.Cog):
             return  # Ya se va a publicar de nuevo, con los votos al día
         self._schedule(self.refresh_tasks, place_id, REFRESH_DELAY, self.refresh)
 
-    async def repost(self, place_id: int):
-        """Publica el top abajo del todo y borra el anterior."""
+    async def repost(self, place_id: int, again: bool = False):
+        """Publica el top abajo del todo y borra el anterior (con `again`, aunque ya sea el último mensaje)."""
         async with self._lock(place_id):
             place, spot, card = self._place(place_id), self.spots.get(place_id), await self._card(place_id)
             if place is None or spot is None or card is None:
                 return
-            if place.last_message_id is not None and place.last_message_id == spot.top_message_id:
+            if not again and place.last_message_id is not None and place.last_message_id == spot.top_message_id:
                 return  # Ya es el último mensaje
             try:
                 message = await place.send(view=card, allowed_mentions=NO_MENTIONS)
@@ -455,7 +476,8 @@ class ClipsCog(commands.Cog):
             place, spot, card = self._place(place_id), self.spots.get(place_id), await self._card(place_id)
             if place is None or spot is None or card is None:
                 return
-            if spot.top_message_id is not None:
+            archived = isinstance(place, discord.Thread) and place.archived
+            if spot.top_message_id is not None and not archived:
                 try:
                     await place.get_partial_message(spot.top_message_id).edit(view=card, allowed_mentions=NO_MENTIONS)
                     return
@@ -464,7 +486,8 @@ class ClipsCog(commands.Cog):
                 except discord.HTTPException as e:
                     logger.warning(f"🎬 Clips: no pude actualizar el top de #{place} ({e})")
                     return
-        await self.repost(place_id)
+        # Sin top, o en una publicación archivada (no se puede editar en ellas): se publica de nuevo
+        await self.repost(place_id, again=True)
 
     @staticmethod
     async def _delete(place: Place, message_id: int):
@@ -640,4 +663,4 @@ class ClipsCog(commands.Cog):
             f"mensaje con un enlace o un vídeo, y {where}. Estoy contando los clips que ya hay.",
             ephemeral=True, allowed_mentions=NO_MENTIONS
         )
-        await self.sync_channel(canal.id)
+        await self.sync_channel(canal.id, everything=True)
