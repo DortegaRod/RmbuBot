@@ -31,6 +31,7 @@ from niveles import NivelesCog
 from perfil import PerfilCog
 from forja import ForjaCog
 from eventos_voz import EventosVozCog
+from clips import ClipsCog
 from tarjetas import NO_MENTIONS
 
 # --- INICIALIZACIÓN ---
@@ -76,6 +77,8 @@ class MusicBot(commands.Bot):
         await self.add_cog(ForjaCog(self))
         # Eventos de voz: /evento-voz; evento de Discord automático al entrar alguien con el rol en su canal
         await self.add_cog(EventosVozCog(self))
+        # Top de clips: en los canales elegidos, el último mensaje es siempre el top 10 de clips más votados
+        await self.add_cog(ClipsCog(self))
         await self.register_commands()
 
     async def register_commands(self):
