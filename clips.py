@@ -6,6 +6,8 @@ de los clips más votados de siempre.
   último mensaje de esa publicación (las publicaciones nuevas lo tienen solas). Aquí, al canal de texto o a
   la publicación donde va un top se le llama «sitio».
 - Un clip es un mensaje con un enlace o un vídeo adjunto (de una persona, no de un bot).
+- Cada puesto del top lleva un botón ▶️ Ver que lleva al clip. Si hay más clips, «📜 Todos los clips» abre la
+  lista entera (10 por página, también los que no tienen votos), solo para quien la pide.
 - Se vota reaccionando con el emoji del canal (por defecto ✅; se puede elegir otro, también del servidor).
   Cuenta cada reacción con ese emoji, también la del autor; las de los bots, no.
 - Cuando alguien escribe en un sitio, el bot borra su top y lo vuelve a publicar abajo (espera unos segundos
@@ -25,7 +27,7 @@ from typing import Dict, Iterable, List, Optional, Union
 from urllib.parse import urlparse
 
 import discord
-from discord import app_commands
+from discord import app_commands, ui
 from discord.ext import commands
 from discord.utils import escape_markdown
 
@@ -36,6 +38,7 @@ from tarjetas import NO_MENTIONS
 logger = logging.getLogger(__name__)
 
 TOP_SIZE = 10            # Clips en el top
+PAGE_SIZE = 10           # Clips por página en la lista entera (📜 Todos los clips)
 DEFAULT_EMOJI = "✅"     # Reacción que vota, si el admin no elige otra
 REPOST_DELAY = 3.0       # Segundos sin mensajes nuevos antes de volver a publicar el top abajo
 REFRESH_DELAY = 2.0      # Segundos que se agrupan los cambios de votos antes de editar el top
@@ -259,6 +262,20 @@ def top_clips(place_id: int, limit: int = TOP_SIZE) -> List[Clip]:
     return [Clip(*row) for row in rows]
 
 
+def count_clips(place_id: int) -> int:
+    with db.get_db_connection() as conn:
+        return conn.execute("SELECT COUNT(*) FROM clips WHERE channel_id = ?", (place_id,)).fetchone()[0]
+
+
+def clips_page(place_id: int, page: int, per_page: int = PAGE_SIZE) -> List[Clip]:
+    """Una página de todos los clips de un sitio (también los que no tienen votos), de más a menos votados."""
+    with db.get_db_connection() as conn:
+        rows = conn.execute("SELECT message_id, author_id, votes, created_at, label FROM clips WHERE channel_id = ? "
+                            "ORDER BY votes DESC, created_at ASC LIMIT ? OFFSET ?",
+                            (place_id, per_page, (page - 1) * per_page)).fetchall()
+    return [Clip(*row) for row in rows]
+
+
 def clip_from(message: discord.Message, emoji: str) -> Optional[Clip]:
     label = clip_label(message)
     if label is None:
@@ -270,22 +287,79 @@ def clip_from(message: discord.Message, emoji: str) -> Optional[Clip]:
 # LA TARJETA DEL TOP
 # ==========================================
 
-def _link_text(label: str) -> str:
-    """El texto de un enlace [texto](url), sin formato ni corchetes que lo rompan."""
-    return escape_markdown(label).replace("[", "(").replace("]", ")")
+def clip_url(guild_id: int, place_id: int, message_id: int) -> str:
+    return f"https://discord.com/channels/{guild_id}/{place_id}/{message_id}"
 
 
-def top_card(guild_id: int, place_id: int, emoji: str, clips: List[Clip]) -> tarjetas.Card:
+def _clip_rows(card: tarjetas.Card, guild_id: int, place_id: int, emoji: str, clips: List[Clip], first: int):
+    """
+    Un bloque por clip: puesto, título y votos, con un botón ▶️ Ver que lleva al mensaje. Con el enlace en un
+    botón, el título puede llevar cualquier cosa (dentro del texto de un enlace, Discord rompe los emojis).
+    """
+    for position, clip in enumerate(clips, first):
+        medal = MEDALS.get(position, f"`#{position}`")
+        votes = "voto" if clip.votes == 1 else "votos"
+        text = f"{medal} **{escape_markdown(clip.label)}**\n-# {emoji} {clip.votes} {votes}"
+        button = ui.Button(style=discord.ButtonStyle.link, label="Ver", emoji="▶️",
+                           url=clip_url(guild_id, place_id, clip.message_id))
+        card.box.add_item(ui.Section(ui.TextDisplay(text), accessory=button))
+
+
+def top_card(guild_id: int, place_id: int, emoji: str, clips: List[Clip], total: int = 0) -> tarjetas.Card:
+    """El top que va abajo del todo. Si hay más clips de los que salen, un botón abre la lista entera."""
     card = tarjetas.Card(COLOUR)
-    lines = []
-    for position, clip in enumerate(clips, 1):
-        url = f"https://discord.com/channels/{guild_id}/{place_id}/{clip.message_id}"
-        medal = MEDALS.get(position, f"**{position}.**")
-        lines.append(f"{medal} [{_link_text(clip.label)}]({url}){tarjetas.ITEM_SEP}{emoji} **{clip.votes}**")
-    card.text(f"## 🎬 Top {TOP_SIZE} clips\n" + ("\n".join(lines) or "Aún no hay clips con votos."))
+    card.text(f"## 🎬 Top {TOP_SIZE} clips")
+    _clip_rows(card, guild_id, place_id, emoji, clips, 1)
+    if not clips:
+        card.text("Aún no hay clips con votos.")
     card.separator()
     card.note(f"Vota un clip reaccionando con {emoji}. Cuenta cualquier mensaje con un enlace o un vídeo.")
+    if total > len(clips):
+        card.buttons(ClipsPageButton(place_id, 1, label=f"Todos los clips ({total})", emoji="📜"))
     return card
+
+
+def list_card(guild_id: int, place_id: int, emoji: str, title: str, page: int, pages: int,
+              clips: List[Clip], total: int) -> tarjetas.Card:
+    """Una página de la lista entera (la que se abre con 📜, solo para quien la pide)."""
+    card = tarjetas.Card(COLOUR)
+    card.text(f"## 📜 Clips de {escape_markdown(title)}\n-# {total} clips, de más a menos votados")
+    _clip_rows(card, guild_id, place_id, emoji, clips, (page - 1) * PAGE_SIZE + 1)
+    if pages > 1:
+        card.buttons(ClipsPageButton(place_id, page - 1, emoji="◀️", disabled=page <= 1),
+                     ClipsPageButton(place_id, page, label=f"{page} / {pages}", disabled=True, tag="n"),
+                     ClipsPageButton(place_id, page + 1, emoji="▶️", disabled=page >= pages))
+    return card
+
+
+class ClipsPageButton(ui.DynamicItem[ui.Button], template=r"reimbou:clips:(?P<place>\d+):(?P<page>\d+)(?::n)?"):
+    """
+    📜 Todos los clips (en el top) y las flechas de la lista. Desde el top, abre la lista solo para quien pulsa;
+    dentro de la lista (que ya solo ve esa persona), cambia de página en el mismo mensaje.
+    """
+
+    def __init__(self, place_id: int, page: int, *, label: Optional[str] = None, emoji=None,
+                 disabled: bool = False, tag: str = ""):
+        super().__init__(ui.Button(label=label, emoji=emoji, disabled=disabled, style=discord.ButtonStyle.secondary,
+                                   custom_id=f"reimbou:clips:{place_id}:{page}" + (f":{tag}" if tag else "")))
+        self.place_id, self.page = place_id, page
+
+    @classmethod
+    async def from_custom_id(cls, interaction: discord.Interaction, item: ui.Button, match):
+        return cls(int(match["place"]), int(match["page"]), label=item.label, emoji=item.emoji, disabled=item.disabled)
+
+    async def callback(self, interaction: discord.Interaction):
+        await tarjetas.run_safely(interaction, self._open)
+
+    async def _open(self, interaction: discord.Interaction):
+        cog = interaction.client.get_cog("ClipsCog")
+        card = await cog.list_page(self.place_id, self.page) if cog else None
+        if card is None:
+            return await interaction.response.send_message("⌛ Este top ya no está activo.", ephemeral=True)
+        if interaction.message is not None and interaction.message.flags.ephemeral:
+            await tarjetas.update(interaction, card)
+        else:
+            await interaction.response.send_message(view=card, ephemeral=True, allowed_mentions=NO_MENTIONS)
 
 
 # ==========================================
@@ -309,6 +383,7 @@ class ClipsCog(commands.Cog):
         init_db()
         self.channels = await asyncio.to_thread(load_channels)
         self.spots = await asyncio.to_thread(load_spots)
+        self.bot.add_dynamic_items(ClipsPageButton)
         self._spawn(self._startup())
 
     async def cog_unload(self):
@@ -429,7 +504,22 @@ class ClipsCog(commands.Cog):
         if config is None:
             return None
         clips = await asyncio.to_thread(top_clips, place_id)
-        return top_card(config.guild_id, place_id, config.emoji, clips)
+        total = await asyncio.to_thread(count_clips, place_id)
+        return top_card(config.guild_id, place_id, config.emoji, clips, total)
+
+    async def list_page(self, place_id: int, page: int) -> Optional[tarjetas.Card]:
+        """Una página de la lista entera de clips de un sitio; None si ese sitio ya no tiene top."""
+        spot = self.spots.get(place_id)
+        config = self.channels.get(spot.parent_id) if spot else None
+        if config is None:
+            return None
+        total = await asyncio.to_thread(count_clips, place_id)
+        pages = max(1, -(-total // PAGE_SIZE))
+        page = min(max(1, page), pages)
+        clips = await asyncio.to_thread(clips_page, place_id, page)
+        place = self._place(place_id)
+        title = place.name if place is not None else "este canal"
+        return list_card(config.guild_id, place_id, config.emoji, title, page, pages, clips, total)
 
     def _schedule(self, tasks: Dict[int, asyncio.Task], place_id: int, delay: float, action):
         """Hace `action` dentro de `delay` segundos; si ya había una pendiente, empieza a contar de nuevo."""
