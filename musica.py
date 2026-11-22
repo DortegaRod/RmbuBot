@@ -10,6 +10,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
+import canciones
 import controls
 import spotify
 from config import MAX_QUEUE_SIZE
@@ -24,6 +25,14 @@ from tarjetas import NO_MENTIONS
 logger = logging.getLogger(__name__)
 
 
+async def track_started(player, song: Song):
+    """Al empezar una canción: su tarjeta «Sonando ahora» y, después (con la tarjeta ya puesta), el top."""
+    try:
+        await controls.announce_now_playing(player, song)
+    finally:
+        await canciones.record_play(player, song)
+
+
 class MusicaCog(commands.Cog):
     """Comandos de música y la salida automática cuando el canal de voz se queda vacío."""
 
@@ -33,7 +42,7 @@ class MusicaCog(commands.Cog):
     async def cog_load(self):
         log_dependency_status()
         # Ganchos del motor de música: tarjeta "Sonando ahora" y avisos en el canal de texto
-        music_manager.on_track_start = controls.announce_now_playing
+        music_manager.on_track_start = track_started
         music_manager.on_track_error = controls.announce_error
         music_manager.on_player_end = controls.retire_now_playing
         # Botones de la tarjeta "Sonando ahora": siguen respondiendo tras un reinicio

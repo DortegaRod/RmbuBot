@@ -130,6 +130,7 @@ class Song:
     available_at: Optional[float] = None  # Hora (Unix) desde la que YouTube deja descargar stream_url (antes, 403)
     retried: bool = False  # Ya se reintentó una vez tras cortarse nada más empezar
     search_query: Optional[str] = None  # Canciones de Spotify: se buscan en YouTube justo antes de sonar
+    counted: bool = False  # Ya se apuntó en el top de canciones (sus repeticiones en bucle no cuentan)
 
     def __str__(self):
         return self.title

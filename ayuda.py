@@ -28,6 +28,7 @@ def _music() -> str:
         f"{cmd('clear')} — Vacía la cola (la que suena sigue)\n"
         f"{cmd('volume')} — Volumen de 0 a 100\n"
         f"{cmd('stop')} — Para la música y saca al bot\n"
+        f"{cmd('top-canciones')} — Las canciones que más han sonado (o las que más ha pedido alguien)\n"
         "-# Cada canción sale en una tarjeta con botones para pausar, saltar, parar y poner bucle.\n"
         "-# De Spotify se buscan sus canciones en YouTube (de las playlists, las 100 primeras).\n"
         "-# Para controlar la música tienes que estar en su canal de voz (los moderadores, desde cualquier sitio)."
