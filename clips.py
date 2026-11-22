@@ -2,14 +2,18 @@
 Top de clips: en los canales que elige un admin con /clips, el bot mantiene como último mensaje un top 10
 de los clips más votados de siempre.
 
+- Vale un canal de texto o un foro. En un foro, cada publicación tiene su propio top, con sus clips, como
+  último mensaje de esa publicación (las publicaciones nuevas lo tienen solas). Aquí, al canal de texto o a
+  la publicación donde va un top se le llama «sitio».
 - Un clip es un mensaje con un enlace o un vídeo adjunto (de una persona, no de un bot).
 - Se vota reaccionando con el emoji del canal (por defecto ✅; se puede elegir otro, también del servidor).
   Cuenta cada reacción con ese emoji, también la del autor; las de los bots, no.
-- Cuando alguien escribe en el canal, el bot borra su top y lo vuelve a publicar abajo (espera unos segundos
+- Cuando alguien escribe en un sitio, el bot borra su top y lo vuelve a publicar abajo (espera unos segundos
   sin mensajes nuevos, para no repetirlo con cada mensaje de una ráfaga). Cuando cambian los votos, edita el
   top donde está.
-- Al activar un canal y al arrancar el bot repasa el historial del canal: cuenta los clips y votos que ya
-  había y quita los clips borrados mientras estaba apagado.
+- Al activar un canal y al arrancar el bot repasa el historial (en un foro, el de las publicaciones abiertas;
+  una archivada se repasa cuando alguien vuelve a escribir en ella): cuenta los clips y votos que ya había y
+  quita los clips borrados mientras estaba apagado.
 """
 
 import asyncio
@@ -34,12 +38,14 @@ TOP_SIZE = 10            # Clips en el top
 DEFAULT_EMOJI = "✅"     # Reacción que vota, si el admin no elige otra
 REPOST_DELAY = 3.0       # Segundos sin mensajes nuevos antes de volver a publicar el top abajo
 REFRESH_DELAY = 2.0      # Segundos que se agrupan los cambios de votos antes de editar el top
-HISTORY_LIMIT = 5000     # Mensajes del historial que se repasan por canal (al activarlo y al arrancar)
+HISTORY_LIMIT = 5000     # Mensajes del historial que se repasan por sitio (al activarlo y al arrancar)
 LABEL_LENGTH = 60        # Largo máximo de la descripción de un clip en el top
 COLOUR = discord.Colour.purple()
 MEDALS = {1: "🥇", 2: "🥈", 3: "🥉"}
 VIDEO_EXTENSIONS = (".mp4", ".mov", ".webm", ".mkv", ".avi", ".m4v", ".gif")
 URL_RE = re.compile(r"https?://\S+", re.IGNORECASE)
+
+Place = Union[discord.TextChannel, discord.Thread]  # Donde va un top: un canal de texto o una publicación
 
 
 # ==========================================
@@ -89,8 +95,16 @@ def count_votes(message: discord.Message, emoji: str) -> int:
 
 @dataclass
 class ClipChannel:
+    """Un canal elegido con /clips."""
     guild_id: int
     emoji: str
+    forum: bool = False
+
+
+@dataclass
+class TopSpot:
+    """Un sitio con top: de qué canal elegido es (él mismo, o el foro de la publicación) y su mensaje de top."""
+    parent_id: int
     top_message_id: Optional[int] = None
 
 
@@ -111,6 +125,17 @@ def init_db():
             emoji TEXT NOT NULL,
             top_message_id INTEGER
         )""")
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(clips_canales)")}
+        if "foro" not in columns:
+            conn.execute("ALTER TABLE clips_canales ADD COLUMN foro INTEGER NOT NULL DEFAULT 0")
+        conn.execute("""CREATE TABLE IF NOT EXISTS clips_sitios (
+            place_id INTEGER PRIMARY KEY,
+            parent_id INTEGER NOT NULL,
+            top_message_id INTEGER
+        )""")
+        # Antes el top de cada canal se guardaba en clips_canales (solo había canales de texto)
+        conn.execute("INSERT OR IGNORE INTO clips_sitios (place_id, parent_id, top_message_id) "
+                     "SELECT channel_id, channel_id, top_message_id FROM clips_canales WHERE foro = 0")
         conn.execute("""CREATE TABLE IF NOT EXISTS clips (
             message_id INTEGER PRIMARY KEY,
             channel_id INTEGER NOT NULL,
@@ -118,35 +143,54 @@ def init_db():
             votes INTEGER NOT NULL DEFAULT 0,
             created_at REAL NOT NULL,
             label TEXT NOT NULL
-        )""")
+        )""")  # channel_id: el sitio del clip (el canal de texto o la publicación del foro)
         conn.execute("CREATE INDEX IF NOT EXISTS clips_por_canal ON clips (channel_id, votes)")
 
 
 def load_channels() -> Dict[int, ClipChannel]:
     with db.get_db_connection() as conn:
-        rows = conn.execute("SELECT channel_id, guild_id, emoji, top_message_id FROM clips_canales").fetchall()
-    return {channel_id: ClipChannel(guild_id, emoji, top_id) for channel_id, guild_id, emoji, top_id in rows}
+        rows = conn.execute("SELECT channel_id, guild_id, emoji, foro FROM clips_canales").fetchall()
+    return {channel_id: ClipChannel(guild_id, emoji, bool(forum)) for channel_id, guild_id, emoji, forum in rows}
+
+
+def load_spots() -> Dict[int, TopSpot]:
+    with db.get_db_connection() as conn:
+        rows = conn.execute("SELECT place_id, parent_id, top_message_id FROM clips_sitios").fetchall()
+    return {place_id: TopSpot(parent_id, top_id) for place_id, parent_id, top_id in rows}
 
 
 def save_channel(channel_id: int, config: Optional[ClipChannel]):
-    """Guarda la configuración de un canal; con None lo quita, con sus clips."""
+    """Guarda un canal elegido; con None lo quita, con sus sitios y sus clips."""
     with db.get_db_connection() as conn:
         if config is None:
+            conn.execute("DELETE FROM clips WHERE channel_id IN "
+                         "(SELECT place_id FROM clips_sitios WHERE parent_id = ?)", (channel_id,))
+            conn.execute("DELETE FROM clips_sitios WHERE parent_id = ?", (channel_id,))
             conn.execute("DELETE FROM clips_canales WHERE channel_id = ?", (channel_id,))
-            conn.execute("DELETE FROM clips WHERE channel_id = ?", (channel_id,))
         else:
-            conn.execute("INSERT INTO clips_canales (channel_id, guild_id, emoji, top_message_id) VALUES (?, ?, ?, ?) "
-                         "ON CONFLICT(channel_id) DO UPDATE SET emoji = excluded.emoji, "
-                         "top_message_id = excluded.top_message_id",
-                         (channel_id, config.guild_id, config.emoji, config.top_message_id))
+            conn.execute("INSERT INTO clips_canales (channel_id, guild_id, emoji, foro) VALUES (?, ?, ?, ?) "
+                         "ON CONFLICT(channel_id) DO UPDATE SET emoji = excluded.emoji, foro = excluded.foro",
+                         (channel_id, config.guild_id, config.emoji, int(config.forum)))
 
 
-def save_clips(channel_id: int, clips: Iterable[Clip]):
+def save_spot(place_id: int, spot: Optional[TopSpot]):
+    """Guarda un sitio; con None lo quita, con sus clips (p. ej. si se borra la publicación)."""
+    with db.get_db_connection() as conn:
+        if spot is None:
+            conn.execute("DELETE FROM clips WHERE channel_id = ?", (place_id,))
+            conn.execute("DELETE FROM clips_sitios WHERE place_id = ?", (place_id,))
+        else:
+            conn.execute("INSERT INTO clips_sitios (place_id, parent_id, top_message_id) VALUES (?, ?, ?) "
+                         "ON CONFLICT(place_id) DO UPDATE SET top_message_id = excluded.top_message_id",
+                         (place_id, spot.parent_id, spot.top_message_id))
+
+
+def save_clips(place_id: int, clips: Iterable[Clip]):
     with db.get_db_connection() as conn:
         conn.executemany("INSERT INTO clips (message_id, channel_id, author_id, votes, created_at, label) "
                          "VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(message_id) DO UPDATE SET votes = excluded.votes, "
                          "label = excluded.label",
-                         [(c.message_id, channel_id, c.author_id, c.votes, c.created_at, c.label) for c in clips])
+                         [(c.message_id, place_id, c.author_id, c.votes, c.created_at, c.label) for c in clips])
 
 
 def forget_clips(message_ids: Iterable[int]) -> int:
@@ -158,20 +202,20 @@ def forget_clips(message_ids: Iterable[int]) -> int:
         return conn.execute(f"DELETE FROM clips WHERE message_id IN ({','.join('?' * len(ids))})", ids).rowcount
 
 
-def replace_scanned(channel_id: int, clips: List[Clip], oldest_scanned: Optional[float], complete: bool):
+def replace_scanned(place_id: int, clips: List[Clip], oldest_scanned: Optional[float], complete: bool):
     """
     Guarda lo encontrado al repasar el historial y quita los clips que ya no están: todos los que falten si se
-    repasó el canal entero; si no, solo los que falten de la parte repasada.
+    repasó el sitio entero; si no, solo los que falten de la parte repasada.
     """
     with db.get_db_connection() as conn:
         found = [clip.message_id for clip in clips]
         marks = ",".join("?" * len(found)) or "NULL"
         if complete:
-            conn.execute(f"DELETE FROM clips WHERE channel_id = ? AND message_id NOT IN ({marks})", (channel_id, *found))
+            conn.execute(f"DELETE FROM clips WHERE channel_id = ? AND message_id NOT IN ({marks})", (place_id, *found))
         elif oldest_scanned is not None:
             conn.execute(f"DELETE FROM clips WHERE channel_id = ? AND created_at >= ? AND message_id NOT IN ({marks})",
-                         (channel_id, oldest_scanned, *found))
-    save_clips(channel_id, clips)
+                         (place_id, oldest_scanned, *found))
+    save_clips(place_id, clips)
 
 
 def is_clip(message_id: int) -> bool:
@@ -179,12 +223,12 @@ def is_clip(message_id: int) -> bool:
         return conn.execute("SELECT 1 FROM clips WHERE message_id = ?", (message_id,)).fetchone() is not None
 
 
-def top_clips(channel_id: int, limit: int = TOP_SIZE) -> List[Clip]:
+def top_clips(place_id: int, limit: int = TOP_SIZE) -> List[Clip]:
     """Los más votados (con al menos un voto); a igualdad, el que se publicó antes."""
     with db.get_db_connection() as conn:
         rows = conn.execute("SELECT message_id, author_id, votes, created_at, label FROM clips "
                             "WHERE channel_id = ? AND votes > 0 ORDER BY votes DESC, created_at ASC LIMIT ?",
-                            (channel_id, limit)).fetchall()
+                            (place_id, limit)).fetchall()
     return [Clip(*row) for row in rows]
 
 
@@ -204,11 +248,11 @@ def _link_text(label: str) -> str:
     return escape_markdown(label).replace("[", "(").replace("]", ")")
 
 
-def top_card(guild_id: int, channel_id: int, emoji: str, clips: List[Clip]) -> tarjetas.Card:
+def top_card(guild_id: int, place_id: int, emoji: str, clips: List[Clip]) -> tarjetas.Card:
     card = tarjetas.Card(COLOUR)
     lines = []
     for position, clip in enumerate(clips, 1):
-        url = f"https://discord.com/channels/{guild_id}/{channel_id}/{clip.message_id}"
+        url = f"https://discord.com/channels/{guild_id}/{place_id}/{clip.message_id}"
         medal = MEDALS.get(position, f"**{position}.**")
         votes = "voto" if clip.votes == 1 else "votos"
         lines.append(f"{medal} [{_link_text(clip.label)}]({url})\n"
@@ -224,25 +268,33 @@ def top_card(guild_id: int, channel_id: int, emoji: str, clips: List[Clip]) -> t
 # ==========================================
 
 class ClipsCog(commands.Cog):
-    """/clips y el top de cada canal de clips."""
+    """/clips y el top de cada sitio."""
 
     def __init__(self, bot: commands.Bot):
         self.bot = bot
-        self.channels: Dict[int, ClipChannel] = {}             # Canal -> configuración
-        self.locks: Dict[int, asyncio.Lock] = {}               # Canal -> uno a uno al publicar o editar el top
-        self.repost_tasks: Dict[int, asyncio.Task] = {}        # Canal -> volver a publicar el top (pendiente)
-        self.refresh_tasks: Dict[int, asyncio.Task] = {}       # Canal -> editar el top (pendiente)
-        self.startup_task: Optional[asyncio.Task] = None
+        self.channels: Dict[int, ClipChannel] = {}             # Canal elegido -> configuración
+        self.spots: Dict[int, TopSpot] = {}                    # Sitio -> su canal elegido y su mensaje de top
+        self.locks: Dict[int, asyncio.Lock] = {}               # Sitio -> uno a uno al repasar, publicar o editar
+        self.repost_tasks: Dict[int, asyncio.Task] = {}        # Sitio -> volver a publicar el top (pendiente)
+        self.refresh_tasks: Dict[int, asyncio.Task] = {}       # Sitio -> editar el top (pendiente)
+        self.tasks: set = set()                                # Repasos en marcha (para cancelarlos al descargar)
 
     async def cog_load(self):
         init_db()
         self.channels = await asyncio.to_thread(load_channels)
-        self.startup_task = asyncio.create_task(self._startup())
+        self.spots = await asyncio.to_thread(load_spots)
+        self._spawn(self._startup())
 
     async def cog_unload(self):
-        for task in [self.startup_task, *self.repost_tasks.values(), *self.refresh_tasks.values()]:
-            if task and not task.done():
+        for task in [*self.tasks, *self.repost_tasks.values(), *self.refresh_tasks.values()]:
+            if not task.done():
                 task.cancel()
+
+    def _spawn(self, coro) -> asyncio.Task:
+        task = asyncio.create_task(coro)
+        self.tasks.add(task)
+        task.add_done_callback(self.tasks.discard)
+        return task
 
     async def _startup(self):
         await self.bot.wait_until_ready()
@@ -252,177 +304,235 @@ class ClipsCog(commands.Cog):
             except Exception:
                 logger.exception(f"🎬 Clips: no pude repasar el canal {channel_id}")
 
-    def _channel(self, channel_id: int) -> Optional[discord.TextChannel]:
-        config = self.channels.get(channel_id)
-        guild = self.bot.get_guild(config.guild_id) if config else None
-        channel = guild.get_channel(channel_id) if guild else None
-        return channel if isinstance(channel, discord.TextChannel) else None
+    # ---------- Sitios ----------
 
-    # ---------- Repasar el canal ----------
+    def _guild(self, parent_id: int) -> Optional[discord.Guild]:
+        config = self.channels.get(parent_id)
+        return self.bot.get_guild(config.guild_id) if config else None
+
+    def _place(self, place_id: int) -> Optional[Place]:
+        spot = self.spots.get(place_id)
+        guild = self._guild(spot.parent_id) if spot else None
+        place = guild.get_channel_or_thread(place_id) if guild else None
+        return place if isinstance(place, (discord.TextChannel, discord.Thread)) else None
+
+    def _parent_of(self, place_id: int, guild_id: Optional[int], thread_parent: Optional[int] = None) -> Optional[int]:
+        """
+        El canal elegido al que pertenece un sitio, o None si no tiene top. Si es una publicación de un foro
+        elegido que aún no conocía, la apunta como sitio.
+        """
+        spot = self.spots.get(place_id)
+        if spot is not None:
+            return spot.parent_id
+        if thread_parent is None and guild_id is not None:
+            guild = self.bot.get_guild(guild_id)
+            thread = guild.get_channel_or_thread(place_id) if guild else None
+            thread_parent = thread.parent_id if isinstance(thread, discord.Thread) else None
+        config = self.channels.get(thread_parent) if thread_parent else None
+        if config is None or not config.forum:
+            return None
+        self.spots[place_id] = TopSpot(thread_parent)
+        return thread_parent
+
+    # ---------- Repasar ----------
 
     async def sync_channel(self, channel_id: int):
-        """Cuenta los clips y votos del historial y deja el top como último mensaje."""
-        channel, config = self._channel(channel_id), self.channels.get(channel_id)
-        if channel is None or config is None:
+        """Repasa un canal elegido: él mismo o, si es un foro, cada publicación abierta."""
+        config, guild = self.channels.get(channel_id), self._guild(channel_id)
+        channel = guild.get_channel(channel_id) if guild else None
+        if config is None or channel is None:
             return
-        clips: List[Clip] = []
-        scanned, oldest = 0, None
-        try:
-            async for message in channel.history(limit=HISTORY_LIMIT):
-                scanned += 1
-                oldest = message.created_at.timestamp()
-                clip = clip_from(message, config.emoji)
-                if clip is not None:
-                    clips.append(clip)
-        except discord.HTTPException as e:
-            logger.warning(f"🎬 Clips: no pude leer el historial de #{channel} ({e})")
-            return
-        await asyncio.to_thread(replace_scanned, channel_id, clips, oldest, scanned < HISTORY_LIMIT)
-        logger.info(f"🎬 Clips: #{channel} repasado ({scanned} mensajes, {len(clips)} clips)")
-        if channel.last_message_id is not None and channel.last_message_id == config.top_message_id:
-            await self.refresh(channel_id)
+        if isinstance(channel, discord.ForumChannel):
+            for thread in list(channel.threads):
+                if not thread.archived and self._parent_of(thread.id, guild.id, channel.id) is not None:
+                    await self.sync_place(thread.id)
         else:
-            await self.repost(channel_id)
+            self.spots.setdefault(channel_id, TopSpot(channel_id))
+            await self.sync_place(channel_id)
+
+    async def sync_place(self, place_id: int):
+        """Cuenta los clips y votos del historial de un sitio y deja el top como último mensaje."""
+        async with self._lock(place_id):
+            place, spot = self._place(place_id), self.spots.get(place_id)
+            config = self.channels.get(spot.parent_id) if spot else None
+            if place is None or config is None:
+                return
+            clips: List[Clip] = []
+            scanned, oldest = 0, None
+            try:
+                async for message in place.history(limit=HISTORY_LIMIT):
+                    scanned += 1
+                    oldest = message.created_at.timestamp()
+                    clip = clip_from(message, config.emoji)
+                    if clip is not None:
+                        clips.append(clip)
+            except discord.HTTPException as e:
+                logger.warning(f"🎬 Clips: no pude leer el historial de #{place} ({e})")
+                return
+            await asyncio.to_thread(replace_scanned, place_id, clips, oldest, scanned < HISTORY_LIMIT)
+            await asyncio.to_thread(save_spot, place_id, spot)
+            logger.info(f"🎬 Clips: #{place} repasado ({scanned} mensajes, {len(clips)} clips)")
+        if place.last_message_id is not None and place.last_message_id == spot.top_message_id:
+            await self.refresh(place_id)
+        else:
+            await self.repost(place_id)
 
     # ---------- Publicar y editar el top ----------
 
-    def _lock(self, channel_id: int) -> asyncio.Lock:
-        return self.locks.setdefault(channel_id, asyncio.Lock())
+    def _lock(self, place_id: int) -> asyncio.Lock:
+        return self.locks.setdefault(place_id, asyncio.Lock())
 
-    async def _card(self, channel_id: int) -> Optional[tarjetas.Card]:
-        config = self.channels.get(channel_id)
+    async def _card(self, place_id: int) -> Optional[tarjetas.Card]:
+        spot = self.spots.get(place_id)
+        config = self.channels.get(spot.parent_id) if spot else None
         if config is None:
             return None
-        clips = await asyncio.to_thread(top_clips, channel_id)
-        return top_card(config.guild_id, channel_id, config.emoji, clips)
+        clips = await asyncio.to_thread(top_clips, place_id)
+        return top_card(config.guild_id, place_id, config.emoji, clips)
 
-    def _schedule(self, tasks: Dict[int, asyncio.Task], channel_id: int, delay: float, action):
+    def _schedule(self, tasks: Dict[int, asyncio.Task], place_id: int, delay: float, action):
         """Hace `action` dentro de `delay` segundos; si ya había una pendiente, empieza a contar de nuevo."""
-        pending = tasks.get(channel_id)
+        pending = tasks.get(place_id)
         if pending and not pending.done():
             pending.cancel()
 
         async def later():
             await asyncio.sleep(delay)
-            tasks.pop(channel_id, None)
-            await action(channel_id)
-        tasks[channel_id] = asyncio.create_task(later())
+            tasks.pop(place_id, None)  # Desde aquí ya no se cancela: no puede quedar un top a medio publicar
+            await action(place_id)
+        tasks[place_id] = asyncio.create_task(later())
 
-    def schedule_repost(self, channel_id: int):
-        self._schedule(self.repost_tasks, channel_id, REPOST_DELAY, self.repost)
+    def schedule_repost(self, place_id: int):
+        self._schedule(self.repost_tasks, place_id, REPOST_DELAY, self.repost)
 
-    def schedule_refresh(self, channel_id: int):
-        pending = self.repost_tasks.get(channel_id)
+    def schedule_refresh(self, place_id: int):
+        pending = self.repost_tasks.get(place_id)
         if pending and not pending.done():
             return  # Ya se va a publicar de nuevo, con los votos al día
-        self._schedule(self.refresh_tasks, channel_id, REFRESH_DELAY, self.refresh)
+        self._schedule(self.refresh_tasks, place_id, REFRESH_DELAY, self.refresh)
 
-    async def repost(self, channel_id: int):
+    async def repost(self, place_id: int):
         """Publica el top abajo del todo y borra el anterior."""
-        async with self._lock(channel_id):
-            channel, config, card = self._channel(channel_id), self.channels.get(channel_id), await self._card(channel_id)
-            if channel is None or config is None or card is None:
+        async with self._lock(place_id):
+            place, spot, card = self._place(place_id), self.spots.get(place_id), await self._card(place_id)
+            if place is None or spot is None or card is None:
                 return
-            if channel.last_message_id is not None and channel.last_message_id == config.top_message_id:
+            if place.last_message_id is not None and place.last_message_id == spot.top_message_id:
                 return  # Ya es el último mensaje
             try:
-                message = await channel.send(view=card, allowed_mentions=NO_MENTIONS)
+                message = await place.send(view=card, allowed_mentions=NO_MENTIONS)
             except discord.HTTPException as e:
-                logger.warning(f"🎬 Clips: no pude publicar el top en #{channel} ({e})")
+                logger.warning(f"🎬 Clips: no pude publicar el top en #{place} ({e})")
                 return
-            old_id, config.top_message_id = config.top_message_id, message.id
-            await asyncio.to_thread(save_channel, channel_id, config)
+            old_id, spot.top_message_id = spot.top_message_id, message.id
+            await asyncio.to_thread(save_spot, place_id, spot)
             if old_id is not None:
-                await self._delete(channel, old_id)
+                await self._delete(place, old_id)
 
-    async def refresh(self, channel_id: int):
+    async def refresh(self, place_id: int):
         """Actualiza el top donde está; si ya no existe, lo publica de nuevo."""
-        async with self._lock(channel_id):
-            channel, config, card = self._channel(channel_id), self.channels.get(channel_id), await self._card(channel_id)
-            if channel is None or config is None or card is None:
+        async with self._lock(place_id):
+            place, spot, card = self._place(place_id), self.spots.get(place_id), await self._card(place_id)
+            if place is None or spot is None or card is None:
                 return
-            if config.top_message_id is not None:
+            if spot.top_message_id is not None:
                 try:
-                    await channel.get_partial_message(config.top_message_id).edit(view=card,
-                                                                                  allowed_mentions=NO_MENTIONS)
+                    await place.get_partial_message(spot.top_message_id).edit(view=card, allowed_mentions=NO_MENTIONS)
                     return
                 except discord.NotFound:
-                    config.top_message_id = None
+                    spot.top_message_id = None
                 except discord.HTTPException as e:
-                    logger.warning(f"🎬 Clips: no pude actualizar el top de #{channel} ({e})")
+                    logger.warning(f"🎬 Clips: no pude actualizar el top de #{place} ({e})")
                     return
-        await self.repost(channel_id)
+        await self.repost(place_id)
 
     @staticmethod
-    async def _delete(channel: discord.TextChannel, message_id: int):
+    async def _delete(place: Place, message_id: int):
         try:
-            await channel.get_partial_message(message_id).delete()
+            await place.get_partial_message(message_id).delete()
         except discord.NotFound:
             pass
         except discord.HTTPException as e:
-            logger.warning(f"🎬 Clips: no pude borrar el top anterior de #{channel} ({e})")
+            logger.warning(f"🎬 Clips: no pude borrar el top anterior de #{place} ({e})")
 
     # ---------- Mensajes y reacciones ----------
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
-        config = self.channels.get(message.channel.id)
-        if config is None or message.author.id == self.bot.user.id:
+        if message.guild is None or message.author.id == self.bot.user.id:
             return
-        clip = clip_from(message, config.emoji)
+        place_id = message.channel.id
+        known = place_id in self.spots
+        thread_parent = message.channel.parent_id if isinstance(message.channel, discord.Thread) else None
+        parent_id = self._parent_of(place_id, message.guild.id, thread_parent)
+        if parent_id is None:
+            return
+        if not known:
+            # Publicación nueva (o archivada que vuelve a tener vida): se repasa entera y sale su top
+            self._spawn(self.sync_place(place_id))
+            return
+        clip = clip_from(message, self.channels[parent_id].emoji)
         if clip is not None:
-            await asyncio.to_thread(save_clips, message.channel.id, [clip])
-        self.schedule_repost(message.channel.id)
+            await asyncio.to_thread(save_clips, place_id, [clip])
+        self.schedule_repost(place_id)
 
-    async def recount(self, channel_id: int, message_id: int):
+    async def recount(self, place_id: int, message_id: int):
         """Vuelve a contar los votos de un mensaje (pidiéndoselo a Discord) y actualiza el top."""
-        config, channel = self.channels.get(channel_id), self._channel(channel_id)
-        if config is None or channel is None or message_id == config.top_message_id:
+        spot, place = self.spots.get(place_id), self._place(place_id)
+        config = self.channels.get(spot.parent_id) if spot else None
+        if config is None or place is None or message_id == spot.top_message_id:
             return
         try:
-            message = await channel.fetch_message(message_id)
+            message = await place.fetch_message(message_id)
         except discord.HTTPException:
             return
         clip = clip_from(message, config.emoji)
         if clip is None:
             return
-        await asyncio.to_thread(save_clips, channel_id, [clip])
-        self.schedule_refresh(channel_id)
+        await asyncio.to_thread(save_clips, place_id, [clip])
+        self.schedule_refresh(place_id)
 
-    def _votes_with(self, channel_id: int, emoji: Union[str, discord.PartialEmoji]) -> bool:
-        config = self.channels.get(channel_id)
-        return config is not None and emoji_key(emoji) == emoji_key(config.emoji)
+    async def _vote_changed(self, place_id: int, guild_id: Optional[int], message_id: int,
+                            emoji: Union[str, discord.PartialEmoji]):
+        """Ha cambiado una reacción: si es la que vota, se recuentan los votos de ese mensaje."""
+        known = place_id in self.spots
+        parent_id = self._parent_of(place_id, guild_id)
+        if parent_id is None or emoji_key(emoji) != emoji_key(self.channels[parent_id].emoji):
+            if not known:
+                self.spots.pop(place_id, None)  # Aún no hay que apuntar la publicación: no ha votado nadie
+            return
+        if not known:
+            self._spawn(self.sync_place(place_id))  # Publicación que no conocía: se repasa entera
+            return
+        await self.recount(place_id, message_id)
 
     @commands.Cog.listener()
     async def on_raw_reaction_add(self, payload: discord.RawReactionActionEvent):
-        if self._votes_with(payload.channel_id, payload.emoji):
-            await self.recount(payload.channel_id, payload.message_id)
+        await self._vote_changed(payload.channel_id, payload.guild_id, payload.message_id, payload.emoji)
 
     @commands.Cog.listener()
     async def on_raw_reaction_remove(self, payload: discord.RawReactionActionEvent):
-        if self._votes_with(payload.channel_id, payload.emoji):
-            await self.recount(payload.channel_id, payload.message_id)
+        await self._vote_changed(payload.channel_id, payload.guild_id, payload.message_id, payload.emoji)
 
     @commands.Cog.listener()
     async def on_raw_reaction_clear(self, payload: discord.RawReactionClearEvent):
-        if payload.channel_id in self.channels and await asyncio.to_thread(is_clip, payload.message_id):
+        if payload.channel_id in self.spots and await asyncio.to_thread(is_clip, payload.message_id):
             await self.recount(payload.channel_id, payload.message_id)
 
     @commands.Cog.listener()
     async def on_raw_reaction_clear_emoji(self, payload: discord.RawReactionClearEmojiEvent):
-        if self._votes_with(payload.channel_id, payload.emoji):
-            await self.recount(payload.channel_id, payload.message_id)
+        await self._vote_changed(payload.channel_id, payload.guild_id, payload.message_id, payload.emoji)
 
-    async def _deleted(self, channel_id: int, message_ids: List[int]):
-        config = self.channels.get(channel_id)
-        if config is None:
+    async def _deleted(self, place_id: int, message_ids: List[int]):
+        spot = self.spots.get(place_id)
+        if spot is None:
             return
-        if config.top_message_id in message_ids:
-            config.top_message_id = None  # Alguien ha borrado el top: vuelve a salir abajo
-            await asyncio.to_thread(save_channel, channel_id, config)
-            self.schedule_repost(channel_id)
+        if spot.top_message_id in message_ids:
+            spot.top_message_id = None  # Alguien ha borrado el top: vuelve a salir abajo
+            await asyncio.to_thread(save_spot, place_id, spot)
+            self.schedule_repost(place_id)
         if await asyncio.to_thread(forget_clips, message_ids):
-            self.schedule_refresh(channel_id)
+            self.schedule_refresh(place_id)
 
     @commands.Cog.listener()
     async def on_raw_message_delete(self, payload: discord.RawMessageDeleteEvent):
@@ -432,41 +542,57 @@ class ClipsCog(commands.Cog):
     async def on_raw_bulk_message_delete(self, payload: discord.RawBulkMessageDeleteEvent):
         await self._deleted(payload.channel_id, list(payload.message_ids))
 
+    @commands.Cog.listener()
+    async def on_raw_thread_delete(self, payload: discord.RawThreadDeleteEvent):
+        """Si se borra una publicación con top, se olvidan ella y sus clips."""
+        if self.spots.pop(payload.thread_id, None) is not None:
+            self._cancel(payload.thread_id)
+            await asyncio.to_thread(save_spot, payload.thread_id, None)
+
+    def _cancel(self, place_id: int):
+        for tasks in (self.repost_tasks, self.refresh_tasks):
+            task = tasks.pop(place_id, None)
+            if task and not task.done():
+                task.cancel()
+
     # ---------- /clips (admins) ----------
 
     def _list_card(self, guild: discord.Guild) -> tarjetas.Card:
-        lines = [f"🎬 <#{channel_id}> · se vota con {config.emoji}"
+        lines = [f"{'💬' if config.forum else '🎬'} <#{channel_id}> · se vota con {config.emoji}"
+                 + (" · un top en cada publicación" if config.forum else "")
                  for channel_id, config in self.channels.items() if config.guild_id == guild.id]
         card = tarjetas.Card(tarjetas.INFO)
         card.text("### 🎬 Canales de clips\n" + ("\n".join(lines) or "Ningún canal todavía."))
-        card.note(f"En cada uno, el último mensaje es siempre el top {TOP_SIZE} de clips más votados. "
-                  f"Añade uno con {tarjetas.cmd('clips')}.")
+        card.note(f"El último mensaje es siempre el top {TOP_SIZE} de clips más votados (en un foro, el de cada "
+                  f"publicación). Añade uno con {tarjetas.cmd('clips')}.")
         return card
 
     @app_commands.command(name="clips", description="Canales con el top 10 de clips más votados (solo admins)")
     @app_commands.guild_only()
     @app_commands.default_permissions(manage_guild=True)
     @app_commands.checks.has_permissions(manage_guild=True)
-    @app_commands.describe(canal="Canal de clips (vacío = ver los que hay)",
+    @app_commands.describe(canal="Canal de texto o foro de clips (vacío = ver los que hay)",
                            emoji=f"Reacción que vota (por defecto {DEFAULT_EMOJI}; vale un emoji del servidor)",
                            quitar="Que ese canal deje de tener top de clips")
-    async def clips(self, interaction: discord.Interaction, canal: Optional[discord.TextChannel] = None,
+    async def clips(self, interaction: discord.Interaction,
+                    canal: Optional[Union[discord.TextChannel, discord.ForumChannel]] = None,
                     emoji: Optional[str] = None, quitar: bool = False):
         guild = interaction.guild
         if canal is None:
             return await interaction.response.send_message(view=self._list_card(guild), ephemeral=True,
                                                            allowed_mentions=NO_MENTIONS)
         if quitar:
-            config = self.channels.pop(canal.id, None)
-            for tasks in (self.repost_tasks, self.refresh_tasks):
-                task = tasks.pop(canal.id, None)
-                if task and not task.done():
-                    task.cancel()
+            self.channels.pop(canal.id, None)
+            places = [place_id for place_id, spot in self.spots.items() if spot.parent_id == canal.id]
+            await interaction.response.send_message(f"✅ {canal.mention} ya no tiene top de clips.", ephemeral=True)
+            for place_id in places:
+                spot = self.spots.pop(place_id)
+                self._cancel(place_id)
+                place = guild.get_channel_or_thread(place_id)
+                if spot.top_message_id and isinstance(place, (discord.TextChannel, discord.Thread)):
+                    await self._delete(place, spot.top_message_id)
             await asyncio.to_thread(save_channel, canal.id, None)
-            if config and config.top_message_id:
-                await self._delete(canal, config.top_message_id)
-            return await interaction.response.send_message(f"✅ {canal.mention} ya no tiene top de clips.",
-                                                           ephemeral=True)
+            return
 
         chosen = (emoji or "").strip() or (self.channels[canal.id].emoji if canal.id in self.channels
                                             else DEFAULT_EMOJI)
@@ -475,19 +601,22 @@ class ClipsCog(commands.Cog):
             return await interaction.response.send_message(
                 "❌ Eso no parece un emoji. Escribe solo el emoji (por ejemplo ✅ o uno del servidor).", ephemeral=True
             )
+        forum = isinstance(canal, discord.ForumChannel)
         perms = canal.permissions_for(guild.me)
-        if not (perms.view_channel and perms.send_messages and perms.read_message_history):
+        can_send = perms.send_messages_in_threads if forum else perms.send_messages
+        if not (perms.view_channel and can_send and perms.read_message_history):
+            where = "Enviar mensajes en hilos y publicaciones" if forum else "Enviar mensajes"
             return await interaction.response.send_message(
-                f"❌ En {canal.mention} necesito **Ver canal**, **Enviar mensajes** y **Leer el historial**.",
-                ephemeral=True
+                f"❌ En {canal.mention} necesito **Ver canal**, **{where}** y **Leer el historial**.", ephemeral=True
             )
-        previous = self.channels.get(canal.id)
-        config = ClipChannel(guild.id, str(parsed), previous.top_message_id if previous else None)
+        config = ClipChannel(guild.id, str(parsed), forum)
         self.channels[canal.id] = config
         await asyncio.to_thread(save_channel, canal.id, config)
+        where = (f"cada publicación de {canal.mention} tendrá su propio top {TOP_SIZE} como último mensaje "
+                 f"(también las nuevas)" if forum else f"el top {TOP_SIZE} será siempre el último mensaje")
         await interaction.response.send_message(
             f"✅ {canal.mention} tiene ahora top de clips: se vota reaccionando con {config.emoji} a cualquier "
-            f"mensaje con un enlace o un vídeo, y el top {TOP_SIZE} será siempre el último mensaje. Estoy "
-            f"contando los clips que ya hay.", ephemeral=True, allowed_mentions=NO_MENTIONS
+            f"mensaje con un enlace o un vídeo, y {where}. Estoy contando los clips que ya hay.",
+            ephemeral=True, allowed_mentions=NO_MENTIONS
         )
         await self.sync_channel(canal.id)
