@@ -6,6 +6,7 @@ de los clips más votados de siempre.
   último mensaje de esa publicación (las publicaciones nuevas lo tienen solas). Aquí, al canal de texto o a
   la publicación donde va un top se le llama «sitio».
 - Un clip es un mensaje con un enlace o un vídeo adjunto (de una persona, no de un bot).
+- Si se edita un clip, el top se actualiza con su título nuevo.
 - Cada puesto del top lleva un botón ▶️ Ver que lleva al clip. Si hay más clips, «📜 Todos los clips» abre la
   lista entera (10 por página, también los que no tienen votos), solo para quien la pide.
 - Se vota reaccionando con el emoji del canal (por defecto ✅; se puede elegir otro, también del servidor).
@@ -610,7 +611,10 @@ class ClipsCog(commands.Cog):
         self.schedule_repost(place_id)
 
     async def recount(self, place_id: int, message_id: int):
-        """Vuelve a contar los votos de un mensaje (pidiéndoselo a Discord) y actualiza el top."""
+        """
+        Vuelve a leer un mensaje (pidiéndoselo a Discord): sus votos y su título. Si ha dejado de ser un clip
+        (lo han editado y ya no tiene enlace ni vídeo), sale del top.
+        """
         spot, place = self.spots.get(place_id), self._place(place_id)
         config = self.channels.get(spot.parent_id) if spot else None
         if config is None or place is None or message_id == spot.top_message_id:
@@ -621,9 +625,23 @@ class ClipsCog(commands.Cog):
             return
         clip = clip_from(message, config.emoji)
         if clip is None:
+            if await asyncio.to_thread(forget_clips, [message_id]):
+                self.schedule_refresh(place_id)
             return
         await asyncio.to_thread(save_clips, place_id, [clip])
         self.schedule_refresh(place_id)
+
+    @commands.Cog.listener()
+    async def on_raw_message_edit(self, payload: discord.RawMessageUpdateEvent):
+        """Al editar un clip (o un mensaje que pasa a serlo), el top se actualiza con su título nuevo."""
+        if payload.channel_id not in self.spots:
+            return
+        data = payload.data
+        if (data.get("author") or {}).get("bot"):
+            return
+        may_be_clip = bool(URL_RE.search(data.get("content") or "") or data.get("attachments"))
+        if may_be_clip or await asyncio.to_thread(is_clip, payload.message_id):
+            await self.recount(payload.channel_id, payload.message_id)
 
     async def _vote_changed(self, place_id: int, guild_id: Optional[int], message_id: int,
                             emoji: Union[str, discord.PartialEmoji]):
