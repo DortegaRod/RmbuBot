@@ -11,9 +11,10 @@ de los clips más votados de siempre.
 - Cuando alguien escribe en un sitio, el bot borra su top y lo vuelve a publicar abajo (espera unos segundos
   sin mensajes nuevos, para no repetirlo con cada mensaje de una ráfaga). Cuando cambian los votos, edita el
   top donde está.
-- Al activar un canal y al arrancar el bot repasa el historial (en un foro, el de las publicaciones abiertas;
-  una archivada se repasa cuando alguien vuelve a escribir en ella): cuenta los clips y votos que ya había y
-  quita los clips borrados mientras estaba apagado.
+- Al activar un canal y al arrancar el bot repasa el historial (en un foro, el de cada publicación, también
+  las archivadas): cuenta los clips y votos que ya había y quita los clips borrados mientras estaba apagado.
+  Publicar el top en una publicación archivada la vuelve a abrir (Discord la archiva otra vez sola). Al
+  arrancar, una archivada que ya tiene su top abajo no se toca: nadie ha escrito en ella.
 """
 
 import asyncio
@@ -58,7 +59,10 @@ def _is_video(attachment: discord.Attachment) -> bool:
 
 
 def clip_label(message: discord.Message) -> Optional[str]:
-    """Descripción corta del clip (su texto, el nombre del vídeo o la web del enlace); None si no es un clip."""
+    """
+    Descripción corta del clip: su texto; si no tiene, el título de la vista previa del enlace (p. ej. el del
+    vídeo de YouTube), el nombre del vídeo o la web del enlace. None si no es un clip.
+    """
     if message.author.bot or message.is_system():
         return None
     links = URL_RE.findall(message.content or "")
@@ -67,7 +71,13 @@ def clip_label(message: discord.Message) -> Optional[str]:
         return None
     text = " ".join(URL_RE.sub(" ", message.content or "").split())
     if not text:
-        text = videos[0].filename if videos else f"Clip de {urlparse(links[0]).netloc.removeprefix('www.')}"
+        titles = [embed.title for embed in getattr(message, "embeds", []) if getattr(embed, "title", None)]
+        if titles:
+            text = " ".join(titles[0].split())
+        elif videos:
+            text = videos[0].filename
+        else:
+            text = f"Clip de {urlparse(links[0]).netloc.removeprefix('www.')}"
     return text if len(text) <= LABEL_LENGTH else text[:LABEL_LENGTH - 1].rstrip() + "…"
 
 
@@ -254,9 +264,7 @@ def top_card(guild_id: int, place_id: int, emoji: str, clips: List[Clip]) -> tar
     for position, clip in enumerate(clips, 1):
         url = f"https://discord.com/channels/{guild_id}/{place_id}/{clip.message_id}"
         medal = MEDALS.get(position, f"**{position}.**")
-        votes = "voto" if clip.votes == 1 else "votos"
-        lines.append(f"{medal} [{_link_text(clip.label)}]({url})\n"
-                     f"-# {emoji} **{clip.votes}** {votes} · de <@{clip.author_id}> · <t:{int(clip.created_at)}:d>")
+        lines.append(f"{medal} [{_link_text(clip.label)}]({url}){tarjetas.ITEM_SEP}{emoji} **{clip.votes}**")
     card.text(f"## 🎬 Top {TOP_SIZE} clips\n" + ("\n".join(lines) or "Aún no hay clips con votos."))
     card.separator()
     card.note(f"Vota un clip reaccionando con {emoji}. Cuenta cualquier mensaje con un enlace o un vídeo.")
@@ -278,6 +286,7 @@ class ClipsCog(commands.Cog):
         self.repost_tasks: Dict[int, asyncio.Task] = {}        # Sitio -> volver a publicar el top (pendiente)
         self.refresh_tasks: Dict[int, asyncio.Task] = {}       # Sitio -> editar el top (pendiente)
         self.tasks: set = set()                                # Repasos en marcha (para cancelarlos al descargar)
+        self.threads: Dict[int, discord.Thread] = {}           # Publicaciones archivadas (no están en la caché)
 
     async def cog_load(self):
         init_db()
@@ -313,7 +322,7 @@ class ClipsCog(commands.Cog):
     def _place(self, place_id: int) -> Optional[Place]:
         spot = self.spots.get(place_id)
         guild = self._guild(spot.parent_id) if spot else None
-        place = guild.get_channel_or_thread(place_id) if guild else None
+        place = (guild.get_channel_or_thread(place_id) if guild else None) or self.threads.get(place_id)
         return place if isinstance(place, (discord.TextChannel, discord.Thread)) else None
 
     def _parent_of(self, place_id: int, guild_id: Optional[int], thread_parent: Optional[int] = None) -> Optional[int]:
@@ -343,8 +352,19 @@ class ClipsCog(commands.Cog):
         if config is None or channel is None:
             return
         if isinstance(channel, discord.ForumChannel):
-            for thread in list(channel.threads):
-                if not thread.archived and self._parent_of(thread.id, guild.id, channel.id) is not None:
+            threads = {thread.id: thread for thread in channel.threads}  # Las abiertas
+            try:
+                async for thread in channel.archived_threads(limit=None):
+                    threads.setdefault(thread.id, thread)
+            except discord.HTTPException as e:
+                logger.warning(f"🎬 Clips: no pude ver las publicaciones archivadas de #{channel} ({e})")
+            for thread in threads.values():
+                if thread.archived:
+                    self.threads[thread.id] = thread  # Para poder publicar, editar o borrar su top
+                spot = self.spots.get(thread.id)
+                if thread.archived and spot and spot.top_message_id and thread.last_message_id == spot.top_message_id:
+                    continue  # Archivada y con su top abajo: no ha cambiado nada
+                if self._parent_of(thread.id, guild.id, channel.id) is not None:
                     await self.sync_place(thread.id)
         else:
             self.spots.setdefault(channel_id, TopSpot(channel_id))
@@ -545,6 +565,7 @@ class ClipsCog(commands.Cog):
     @commands.Cog.listener()
     async def on_raw_thread_delete(self, payload: discord.RawThreadDeleteEvent):
         """Si se borra una publicación con top, se olvidan ella y sus clips."""
+        self.threads.pop(payload.thread_id, None)
         if self.spots.pop(payload.thread_id, None) is not None:
             self._cancel(payload.thread_id)
             await asyncio.to_thread(save_spot, payload.thread_id, None)
@@ -588,7 +609,7 @@ class ClipsCog(commands.Cog):
             for place_id in places:
                 spot = self.spots.pop(place_id)
                 self._cancel(place_id)
-                place = guild.get_channel_or_thread(place_id)
+                place = guild.get_channel_or_thread(place_id) or self.threads.pop(place_id, None)
                 if spot.top_message_id and isinstance(place, (discord.TextChannel, discord.Thread)):
                     await self._delete(place, spot.top_message_id)
             await asyncio.to_thread(save_channel, canal.id, None)
