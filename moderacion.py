@@ -1,5 +1,5 @@
 """
-Moderación: reglas que un admin pone a un canal con /moderacion. Por ahora hay una:
+Moderación: reglas que un admin pone a un canal con /moderacion (una por canal):
 
 - «Solo vídeos»: solo se pueden mandar vídeos (un archivo de vídeo o un enlace que Discord enseña como vídeo,
   también reenviados; los GIF no, ver videos.py). Lo demás se borra sin avisar, y sin pasar por el log de
@@ -8,6 +8,7 @@ Moderación: reglas que un admin pone a un canal con /moderacion. Por ahora hay 
   - En un foro, el primer mensaje de cada publicación no se toca.
   - Si el mensaje lleva un enlace sin vista previa todavía (Discord la añade unos segundos después), se
     espera un poco antes de decidir.
+- «Solo audios»: igual, pero lo que vale es un archivo de audio o una nota de voz (los enlaces, no).
 """
 
 import asyncio
@@ -29,8 +30,10 @@ logger = logging.getLogger(__name__)
 
 PREVIEW_WAIT = 8.0  # Segundos que se espera la vista previa de un enlace antes de decidir si es un vídeo
 ONLY_VIDEOS = "solo-videos"
-RULES = {ONLY_VIDEOS: "🎬 Solo vídeos"}
-RULE_HELP = {ONLY_VIDEOS: "solo vídeos (archivo o enlace a un vídeo; los GIF no)"}
+ONLY_AUDIOS = "solo-audios"
+RULES = {ONLY_VIDEOS: "🎬 Solo vídeos", ONLY_AUDIOS: "🎵 Solo audios"}
+RULE_HELP = {ONLY_VIDEOS: "solo vídeos (archivo o enlace a un vídeo; los GIF no)",
+             ONLY_AUDIOS: "solo audios (archivo de audio o nota de voz)"}
 
 Moderated = Union[discord.TextChannel, discord.ForumChannel, discord.VoiceChannel]
 
@@ -82,22 +85,24 @@ class ModeracionCog(commands.Cog):
         rule = self.rules.get(channel.id) or self.rules.get(getattr(channel, "parent_id", None))
         return rule.rule if rule else None
 
-    # ---------- Solo vídeos ----------
+    # ---------- Solo vídeos / solo audios ----------
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
         if message.guild is None or message.author.bot or message.is_system():
             return
         channel = message.channel
-        if self.rule_for(channel) != ONLY_VIDEOS:
+        rule = self.rule_for(channel)
+        if rule not in (ONLY_VIDEOS, ONLY_AUDIOS):
             return
         if isinstance(channel, discord.Thread) and message.id == channel.id:
             return  # El primer mensaje de una publicación de un foro no se toca
         if channel.permissions_for(message.author).manage_messages:
             return
-        if videos.has_video(message):
+        allowed = videos.has_video if rule == ONLY_VIDEOS else videos.has_audio
+        if allowed(message):
             return
-        if videos.waiting_preview(message):
+        if rule == ONLY_VIDEOS and videos.waiting_preview(message):
             # La vista previa del enlace llega unos segundos después: se espera y se vuelve a mirar
             await asyncio.sleep(PREVIEW_WAIT)
             try:
@@ -107,7 +112,7 @@ class ModeracionCog(commands.Cog):
             except discord.HTTPException as e:
                 logger.warning(f"🛡️ Moderación: no pude volver a leer un mensaje en #{channel}: {e}")
                 return
-            if videos.has_video(message):
+            if allowed(message):
                 return
         cache.mark_moderated(message.id)
         try:
@@ -116,7 +121,7 @@ class ModeracionCog(commands.Cog):
             pass
         except discord.HTTPException as e:
             cache.was_moderated(message.id)  # No se borró: que no se quede apuntado
-            logger.warning(f"🛡️ Moderación: no pude borrar un mensaje sin vídeo en #{channel}: {e}")
+            logger.warning(f"🛡️ Moderación: no pude borrar un mensaje en #{channel} ({RULES[rule]}): {e}")
 
     # ---------- /moderacion (admins) ----------
 
@@ -129,7 +134,7 @@ class ModeracionCog(commands.Cog):
                   "en el canal se la salta.")
         return card
 
-    @app_commands.command(name="moderacion", description="Reglas de un canal, como «solo vídeos» (solo admins)")
+    @app_commands.command(name="moderacion", description="Reglas de un canal: solo vídeos o solo audios (solo admins)")
     @app_commands.guild_only()
     @app_commands.default_permissions(manage_guild=True)
     @app_commands.checks.has_permissions(manage_guild=True)

@@ -5,8 +5,8 @@ los clips más votados de siempre.
 - Vale un canal de texto o un foro. En un foro, cada publicación tiene su propio top, con sus clips, como
   último mensaje de esa publicación (las publicaciones nuevas lo tienen solas). Aquí, al canal de texto o a
   la publicación donde va un top se le llama «sitio».
-- Un clip es un mensaje con un vídeo adjunto o un enlace que Discord enseña como vídeo, también reenviado (de una
-  persona, no de un bot). Los GIF no cuentan (ver videos.py).
+- Un clip es un mensaje con un vídeo (adjunto o un enlace que Discord enseña como vídeo) o un audio (adjunto o
+  nota de voz), también reenviado, de una persona y no de un bot. Los GIF no cuentan (ver videos.py).
 - Si se edita un clip, el top se actualiza con su título nuevo.
 - El top tiene todos los clips (también los que no tienen votos), 10 por página. Cada puesto lleva un botón
   ▶️ Ver que lleva al clip. Las flechas abren las otras páginas solo para quien las pulsa.
@@ -81,17 +81,17 @@ def clip_label(message: discord.Message) -> Optional[str]:
     Descripción corta del clip: su texto (o el del mensaje reenviado); si no tiene, el título de la vista previa
     del vídeo (p. ej. el de YouTube), el nombre del archivo o la web del enlace. None si no es un clip.
     """
-    if message.author.bot or message.is_system() or not videos.has_video(message):
+    if message.author.bot or message.is_system() or not (videos.has_video(message) or videos.has_audio(message)):
         return None
     text = next((found for found in map(plain_text, videos.sources(message)) if found), "")
     if not text:
         titles = [embed.title for embed in videos.video_embeds(message) if getattr(embed, "title", None)]
-        files = videos.video_files(message)
+        files = videos.video_files(message) or videos.audio_files(message)
         links = videos.links(message)
         if titles:
             text = " ".join(titles[0].split())
         elif files:
-            text = files[0].filename
+            text = "Nota de voz" if videos.is_voice_message(files[0]) else files[0].filename
         elif links:
             text = f"Clip de {urlparse(links[0]).netloc.removeprefix('www.')}"
         else:
@@ -734,7 +734,7 @@ class ClipsCog(commands.Cog):
                  f"(también las nuevas)" if forum else "el top será siempre el último mensaje")
         await interaction.response.send_message(
             f"✅ {canal.mention} tiene ahora top de clips: se vota reaccionando con {config.emoji} a cualquier "
-            f"clip (un vídeo o un enlace a un vídeo; los GIF no), y {where}. Estoy contando los clips que ya hay.",
+            f"clip (un vídeo, un enlace a un vídeo o un audio; los GIF no), y {where}. Estoy contando los clips que ya hay.",
             ephemeral=True, allowed_mentions=NO_MENTIONS
         )
         await self.sync_channel(canal.id, everything=True)
