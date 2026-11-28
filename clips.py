@@ -5,7 +5,8 @@ los clips más votados de siempre.
 - Vale un canal de texto o un foro. En un foro, cada publicación tiene su propio top, con sus clips, como
   último mensaje de esa publicación (las publicaciones nuevas lo tienen solas). Aquí, al canal de texto o a
   la publicación donde va un top se le llama «sitio».
-- Un clip es un mensaje con un enlace o un vídeo adjunto (de una persona, no de un bot).
+- Un clip es un mensaje con un vídeo adjunto o un enlace que Discord enseña como vídeo, también reenviado (de una
+  persona, no de un bot). Los GIF no cuentan (ver videos.py).
 - Si se edita un clip, el top se actualiza con su título nuevo.
 - El top tiene todos los clips (también los que no tienen votos), 10 por página. Cada puesto lleva un botón
   ▶️ Ver que lleva al clip. Las flechas abren las otras páginas solo para quien las pulsa.
@@ -34,6 +35,7 @@ from discord.utils import escape_markdown
 
 import db
 import tarjetas
+import videos
 from tarjetas import NO_MENTIONS
 
 logger = logging.getLogger(__name__)
@@ -46,8 +48,8 @@ HISTORY_LIMIT = 5000     # Mensajes del historial que se repasan por sitio (al a
 LABEL_LENGTH = 60        # Largo máximo de la descripción de un clip en el top
 COLOUR = discord.Colour.purple()
 MEDALS = {1: "🥇", 2: "🥈", 3: "🥉"}
-VIDEO_EXTENSIONS = (".mp4", ".mov", ".webm", ".mkv", ".avi", ".m4v", ".gif")
-URL_RE = re.compile(r"https?://\S+", re.IGNORECASE)
+URL_RE = videos.URL_RE
+MENTION_RE = re.compile(r"<(?:@[!&]?|#)\d+>")  # En un reenvío no hay clean_content: las menciones se quitan
 LINE_MARK_RE = re.compile(r"^\s*(?:#{1,3}|-#|>{1,3}|[-*+]|\d+\.)\s+", re.MULTILINE)  # Títulos, citas, listas
 CUSTOM_EMOJI_RE = re.compile(r"<a?:(\w+):\d+>")
 TIMESTAMP_RE = re.compile(r"<t:(-?\d+)(?::[tTdDfFR])?>")
@@ -59,17 +61,13 @@ Place = Union[discord.TextChannel, discord.Thread]  # Donde va un top: un canal 
 # QUÉ ES UN CLIP
 # ==========================================
 
-def _is_video(attachment: discord.Attachment) -> bool:
-    content_type = attachment.content_type or ""
-    return content_type.startswith("video/") or attachment.filename.lower().endswith(VIDEO_EXTENSIONS)
-
-
 def plain_text(message: discord.Message) -> str:
     """
     El texto del mensaje sin formato, para usarlo como texto de un enlace: las menciones pasan a @nombre
     (Discord no deja menciones dentro de un enlace y lo rompe), sin títulos, citas ni listas, y sin enlaces.
     """
     text = getattr(message, "clean_content", None) or message.content or ""
+    text = MENTION_RE.sub(" ", text)
     text = URL_RE.sub(" ", text)
     text = LINE_MARK_RE.sub("", text)
     text = CUSTOM_EMOJI_RE.sub(r":\1:", text)
@@ -80,24 +78,24 @@ def plain_text(message: discord.Message) -> str:
 
 def clip_label(message: discord.Message) -> Optional[str]:
     """
-    Descripción corta del clip: su texto; si no tiene, el título de la vista previa del enlace (p. ej. el del
-    vídeo de YouTube), el nombre del vídeo o la web del enlace. None si no es un clip.
+    Descripción corta del clip: su texto (o el del mensaje reenviado); si no tiene, el título de la vista previa
+    del vídeo (p. ej. el de YouTube), el nombre del archivo o la web del enlace. None si no es un clip.
     """
-    if message.author.bot or message.is_system():
+    if message.author.bot or message.is_system() or not videos.has_video(message):
         return None
-    links = URL_RE.findall(message.content or "")
-    videos = [attachment for attachment in message.attachments if _is_video(attachment)]
-    if not links and not videos:
-        return None
-    text = plain_text(message)
+    text = next((found for found in map(plain_text, videos.sources(message)) if found), "")
     if not text:
-        titles = [embed.title for embed in getattr(message, "embeds", []) if getattr(embed, "title", None)]
+        titles = [embed.title for embed in videos.video_embeds(message) if getattr(embed, "title", None)]
+        files = videos.video_files(message)
+        links = videos.links(message)
         if titles:
             text = " ".join(titles[0].split())
-        elif videos:
-            text = videos[0].filename
-        else:
+        elif files:
+            text = files[0].filename
+        elif links:
             text = f"Clip de {urlparse(links[0]).netloc.removeprefix('www.')}"
+        else:
+            text = "Clip"
     return text if len(text) <= LABEL_LENGTH else text[:LABEL_LENGTH - 1].rstrip() + "…"
 
 
@@ -580,7 +578,7 @@ class ClipsCog(commands.Cog):
     async def recount(self, place_id: int, message_id: int):
         """
         Vuelve a leer un mensaje (pidiéndoselo a Discord): sus votos y su título. Si ha dejado de ser un clip
-        (lo han editado y ya no tiene enlace ni vídeo), sale del top.
+        (lo han editado y ya no tiene vídeo), sale del top.
         """
         spot, place = self.spots.get(place_id), self._place(place_id)
         config = self.channels.get(spot.parent_id) if spot else None
@@ -606,7 +604,8 @@ class ClipsCog(commands.Cog):
         data = payload.data
         if (data.get("author") or {}).get("bot"):
             return
-        may_be_clip = bool(URL_RE.search(data.get("content") or "") or data.get("attachments"))
+        may_be_clip = bool(URL_RE.search(data.get("content") or "") or data.get("attachments") or data.get("embeds")
+                           or data.get("message_snapshots"))
         if may_be_clip or await asyncio.to_thread(is_clip, payload.message_id):
             await self.recount(payload.channel_id, payload.message_id)
 
@@ -735,7 +734,7 @@ class ClipsCog(commands.Cog):
                  f"(también las nuevas)" if forum else "el top será siempre el último mensaje")
         await interaction.response.send_message(
             f"✅ {canal.mention} tiene ahora top de clips: se vota reaccionando con {config.emoji} a cualquier "
-            f"mensaje con un enlace o un vídeo, y {where}. Estoy contando los clips que ya hay.",
+            f"clip (un vídeo o un enlace a un vídeo; los GIF no), y {where}. Estoy contando los clips que ya hay.",
             ephemeral=True, allowed_mentions=NO_MENTIONS
         )
         await self.sync_channel(canal.id, everything=True)

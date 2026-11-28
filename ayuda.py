@@ -78,13 +78,27 @@ def _admin() -> str:
     )
 
 
+def _moderacion() -> str:
+    return (
+        "## 🛡️ Moderación\n"
+        f"{cmd('moderacion')} — Pon una regla a un canal o foro, o mira las que hay\n"
+        "**🎬 Solo vídeos** — Solo se puede mandar un vídeo: un archivo o un enlace que Discord enseña como vídeo "
+        "(YouTube, Medal...), también reenviado. Los GIF no valen.\n"
+        "-# Lo demás se borra sin avisar (y no sale en el log de borrados). Quien tiene «Gestionar mensajes» en el "
+        "canal puede escribir igual. En un foro, el primer mensaje de cada publicación no se toca.\n"
+        "-# Necesita el permiso «Gestionar servidor»."
+    )
+
+
 # Sección -> (emoji, nombre, descripción en el menú, texto)
 SECTIONS: Dict[str, Tuple[str, str, str, Callable[[], str]]] = {
     "musica": ("🎵", "Música", "YouTube, Spotify y radios, con botones en cada canción", _music),
     "palabra": ("📊", "Palabra del día", "El Wordle en español, con rachas", _palabra),
     "niveles": ("📜", "Gremio", "Tu perfil, nivel, monedas y el ranking del gremio", _gremio),
     "admin": ("⚙️", "Administración", "Configuración del bot (solo admins)", _admin),
+    "moderacion": ("🛡️", "Moderación", "Reglas por canal, como «solo vídeos» (solo admins)", _moderacion),
 }
+ADMIN_SECTIONS = ("admin", "moderacion")  # Solo las ven quienes tienen «Gestionar servidor»
 
 
 def _is_admin(member: discord.abc.User) -> bool:
@@ -95,7 +109,7 @@ def _is_admin(member: discord.abc.User) -> bool:
 def _overview(admin: bool) -> str:
     lines = ["## 🎧 ReimbouBOT"]
     for key, (emoji, name, description, _) in SECTIONS.items():
-        if key != "admin" or admin:
+        if key not in ADMIN_SECTIONS or admin:
             lines.append(f"{emoji} **{name}** — {description.replace(' (solo admins)', '')}")
     lines.append("-# Elige una sección en el menú.")
     return "\n".join(lines)
@@ -103,7 +117,7 @@ def _overview(admin: bool) -> str:
 
 def help_card(member: discord.abc.User, section: Optional[str] = None) -> tarjetas.Card:
     admin = _is_admin(member)
-    if section == "admin" and not admin:
+    if section in ADMIN_SECTIONS and not admin:
         section = None
     card = tarjetas.Card(tarjetas.INFO)
     card.text(SECTIONS[section][3]() if section in SECTIONS else _overview(admin))
@@ -118,7 +132,7 @@ class HelpMenu(ui.DynamicItem[ui.Select], template=r"reimbou:ayuda"):
     def __init__(self, admin: bool, current: Optional[str] = None):
         options = [discord.SelectOption(label=name, value=key, emoji=emoji, description=description,
                                         default=key == current)
-                   for key, (emoji, name, description, _) in SECTIONS.items() if key != "admin" or admin]
+                   for key, (emoji, name, description, _) in SECTIONS.items() if key not in ADMIN_SECTIONS or admin]
         super().__init__(ui.Select(custom_id="reimbou:ayuda", placeholder="Elige una sección", options=options))
 
     @classmethod

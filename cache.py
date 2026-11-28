@@ -98,3 +98,19 @@ def remove_cached(message_id: int) -> bool:
     except Exception as e:
         logger.error(f"Error al eliminar del cache mensaje {message_id}: {e}")
         return False
+
+
+# Mensajes que borra el propio bot por una regla de moderación (moderacion.py): no van al log de borrados
+_moderated: set = set()
+
+
+def mark_moderated(message_id: int) -> None:
+    _moderated.add(message_id)
+
+
+def was_moderated(message_id: int) -> bool:
+    """True (una sola vez) si el bot borró ese mensaje por una regla de moderación."""
+    if message_id in _moderated:
+        _moderated.discard(message_id)
+        return True
+    return False

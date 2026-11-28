@@ -33,6 +33,7 @@ from forja import ForjaCog
 from eventos_voz import EventosVozCog
 from clips import ClipsCog
 from canciones import CancionesCog
+from moderacion import ModeracionCog
 from tarjetas import NO_MENTIONS
 
 # --- INICIALIZACIÓN ---
@@ -82,6 +83,8 @@ class MusicBot(commands.Bot):
         await self.add_cog(ClipsCog(self))
         # Top de canciones: /top-canciones, con las que más han sonado (o las que más ha pedido alguien)
         await self.add_cog(CancionesCog(self))
+        # Moderación: /moderacion, reglas por canal (por ahora, «solo vídeos»)
+        await self.add_cog(ModeracionCog(self))
         await self.register_commands()
 
     async def register_commands(self):
@@ -233,6 +236,9 @@ async def on_raw_message_delete(payload: discord.RawMessageDeleteEvent):
     # Solo auditamos el servidor configurado
     if log_guild_id is None or payload.guild_id != log_guild_id:
         return
+    if cache.was_moderated(payload.message_id):
+        cache.remove_cached(payload.message_id)
+        return  # Lo borró el bot por una regla de moderación (p. ej. «solo vídeos»): no es un borrado que vigilar
 
     # Intenta recuperar de memoria volátil (Caché), si falla, acude a SQLite (DB)
     record = cache.get_cached(payload.message_id)
