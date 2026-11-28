@@ -85,6 +85,7 @@ def _moderacion() -> str:
         "**🎬 Solo vídeos** — Solo se puede mandar un vídeo: un archivo o un enlace que Discord enseña como vídeo "
         "(YouTube, Medal...), también reenviado. Los GIF no valen.\n"
         "**🎵 Solo audios** — Solo se puede mandar un audio: un archivo o una nota de voz, también reenviado.\n"
+        "**🎞️ Vídeos y audios** — Vale cualquiera de las dos cosas.\n"
         "-# Lo demás se borra sin avisar (y no sale en el log de borrados). Quien tiene «Gestionar mensajes» en el "
         "canal puede escribir igual. En un foro, el primer mensaje de cada publicación no se toca.\n"
         "-# Necesita el permiso «Gestionar servidor»."
@@ -97,7 +98,7 @@ SECTIONS: Dict[str, Tuple[str, str, str, Callable[[], str]]] = {
     "palabra": ("📊", "Palabra del día", "El Wordle en español, con rachas", _palabra),
     "niveles": ("📜", "Gremio", "Tu perfil, nivel, monedas y el ranking del gremio", _gremio),
     "admin": ("⚙️", "Administración", "Configuración del bot (solo admins)", _admin),
-    "moderacion": ("🛡️", "Moderación", "Reglas por canal: solo vídeos o solo audios (solo admins)", _moderacion),
+    "moderacion": ("🛡️", "Moderación", "Reglas por canal: solo vídeos, solo audios o los dos (solo admins)", _moderacion),
 }
 ADMIN_SECTIONS = ("admin", "moderacion")  # Solo las ven quienes tienen «Gestionar servidor»
 

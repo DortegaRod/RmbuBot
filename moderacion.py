@@ -9,6 +9,7 @@ Moderación: reglas que un admin pone a un canal con /moderacion (una por canal)
   - Si el mensaje lleva un enlace sin vista previa todavía (Discord la añade unos segundos después), se
     espera un poco antes de decidir.
 - «Solo audios»: igual, pero lo que vale es un archivo de audio o una nota de voz (los enlaces, no).
+- «Vídeos y audios»: vale cualquiera de las dos cosas.
 """
 
 import asyncio
@@ -31,9 +32,16 @@ logger = logging.getLogger(__name__)
 PREVIEW_WAIT = 8.0  # Segundos que se espera la vista previa de un enlace antes de decidir si es un vídeo
 ONLY_VIDEOS = "solo-videos"
 ONLY_AUDIOS = "solo-audios"
-RULES = {ONLY_VIDEOS: "🎬 Solo vídeos", ONLY_AUDIOS: "🎵 Solo audios"}
+VIDEOS_AND_AUDIOS = "videos-audios"
+RULES = {ONLY_VIDEOS: "🎬 Solo vídeos", ONLY_AUDIOS: "🎵 Solo audios", VIDEOS_AND_AUDIOS: "🎞️ Vídeos y audios"}
 RULE_HELP = {ONLY_VIDEOS: "solo vídeos (archivo o enlace a un vídeo; los GIF no)",
-             ONLY_AUDIOS: "solo audios (archivo de audio o nota de voz)"}
+             ONLY_AUDIOS: "solo audios (archivo de audio o nota de voz)",
+             VIDEOS_AND_AUDIOS: "solo vídeos y audios (archivo o enlace a un vídeo, archivo de audio o nota de voz; "
+                                "los GIF no)"}
+# Qué deja pasar cada regla
+ALLOWED = {ONLY_VIDEOS: videos.has_video, ONLY_AUDIOS: videos.has_audio,
+           VIDEOS_AND_AUDIOS: lambda message: videos.has_video(message) or videos.has_audio(message)}
+WITH_LINKS = (ONLY_VIDEOS, VIDEOS_AND_AUDIOS)  # Reglas en las que vale un enlace (hay que esperar su vista previa)
 
 Moderated = Union[discord.TextChannel, discord.ForumChannel, discord.VoiceChannel]
 
@@ -85,7 +93,7 @@ class ModeracionCog(commands.Cog):
         rule = self.rules.get(channel.id) or self.rules.get(getattr(channel, "parent_id", None))
         return rule.rule if rule else None
 
-    # ---------- Solo vídeos / solo audios ----------
+    # ---------- Solo vídeos / solo audios / vídeos y audios ----------
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
@@ -93,16 +101,16 @@ class ModeracionCog(commands.Cog):
             return
         channel = message.channel
         rule = self.rule_for(channel)
-        if rule not in (ONLY_VIDEOS, ONLY_AUDIOS):
+        allowed = ALLOWED.get(rule)
+        if allowed is None:
             return
         if isinstance(channel, discord.Thread) and message.id == channel.id:
             return  # El primer mensaje de una publicación de un foro no se toca
         if channel.permissions_for(message.author).manage_messages:
             return
-        allowed = videos.has_video if rule == ONLY_VIDEOS else videos.has_audio
         if allowed(message):
             return
-        if rule == ONLY_VIDEOS and videos.waiting_preview(message):
+        if rule in WITH_LINKS and videos.waiting_preview(message):
             # La vista previa del enlace llega unos segundos después: se espera y se vuelve a mirar
             await asyncio.sleep(PREVIEW_WAIT)
             try:
@@ -134,7 +142,7 @@ class ModeracionCog(commands.Cog):
                   "en el canal se la salta.")
         return card
 
-    @app_commands.command(name="moderacion", description="Reglas de un canal: solo vídeos o solo audios (solo admins)")
+    @app_commands.command(name="moderacion", description="Reglas de un canal: solo vídeos, solo audios o los dos (solo admins)")
     @app_commands.guild_only()
     @app_commands.default_permissions(manage_guild=True)
     @app_commands.checks.has_permissions(manage_guild=True)
